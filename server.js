@@ -54,14 +54,14 @@ app.post('/api/login', (req, res) => {
           id: user.id,
           email: user.email,
           firstName: user.first_name,
-          role: user.role === 0 ? 'admin' : 'user' // fixed
+          role: user.role === 0 ? 'admin' : 'user'
         }
       });
     });
   });
 });
 
-// otp regis
+// ------------------ OTP REGISTRATION ------------------
 const otpStore = {};
 
 const transporter = nodemailer.createTransport({
@@ -72,13 +72,34 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// send otp
+// ------------------ SEND OTP ------------------
 app.post('/api/register/send-otp', (req, res) => {
   const { firstName, lastName, phone, address, email, password } = req.body;
 
   if (!firstName || !lastName || !email || !password) {
     return res.status(400).json({ message: 'Required fields missing' });
   }
+
+  // ================== NEW VALIDATIONS ==================
+  const nameRegex = /^[A-Za-z\s]+$/;
+  if (!nameRegex.test(firstName) || !nameRegex.test(lastName)) {
+    return res.status(400).json({ message: 'Name can only contain letters and spaces' });
+  }
+
+  const phoneRegex = /^\+63\d{10}$/;
+  if (!phoneRegex.test(phone)) {
+    return res.status(400).json({ message: 'Phone number must start with +63 and contain 10 digits after it' });
+  }
+
+  const uppercase = /[A-Z]/.test(password);
+  const number = /\d/.test(password);
+  const special = /[^A-Za-z0-9]/.test(password);
+  const length = password.length >= 8 && password.length <= 12;
+
+  if (!uppercase || !number || !special || !length) {
+    return res.status(400).json({ message: 'Password does not meet all criteria' });
+  }
+  // ====================================================
 
   // Check if email is already registered
   db.query('SELECT * FROM users WHERE email = ?', [email], (err, results) => {
@@ -105,6 +126,7 @@ app.post('/api/register/send-otp', (req, res) => {
   });
 });
 
+// ------------------ VERIFY OTP ------------------
 app.post('/api/register/verify-otp', (req, res) => {
   const { email, otp } = req.body;
 
@@ -125,9 +147,29 @@ app.post('/api/register/verify-otp', (req, res) => {
     return res.status(400).json({ message: 'Missing required user fields' });
   }
 
+  // ================== NEW VALIDATIONS (AGAIN) ==================
+  const nameRegex = /^[A-Za-z\s]+$/;
+  if (!nameRegex.test(firstName) || !nameRegex.test(lastName)) {
+    return res.status(400).json({ message: 'Name can only contain letters and spaces' });
+  }
+
+  const phoneRegex = /^\+63\d{10}$/;
+  if (!phoneRegex.test(phone)) {
+    return res.status(400).json({ message: 'Phone number must start with +63 and contain 10 digits after it' });
+  }
+
+  const uppercase = /[A-Z]/.test(password);
+  const number = /\d/.test(password);
+  const special = /[^A-Za-z0-9]/.test(password);
+  const length = password.length >= 8 && password.length <= 12;
+
+  if (!uppercase || !number || !special || !length) {
+    return res.status(400).json({ message: 'Password does not meet all criteria' });
+  }
+  // ====================================================
+
   const role = 1; // regular user
 
-  // First, check if email already exists
   db.query('SELECT id FROM users WHERE email = ?', [email], (err, results) => {
     if (err) return res.status(500).json({ message: 'Database error checking email', error: err.code });
     if (results.length > 0) {
@@ -135,7 +177,6 @@ app.post('/api/register/verify-otp', (req, res) => {
       return res.status(400).json({ message: 'Email already registered' });
     }
 
-    // Hash password and insert
     bcrypt.hash(password, 10, (err, hashedPassword) => {
       if (err) return res.status(500).json({ message: 'Error hashing password', error: err.message });
 
@@ -158,12 +199,10 @@ app.post('/api/register/verify-otp', (req, res) => {
   });
 });
 
-
-
 // ------------------ CREATE DEFAULT ADMIN ------------------
 const createAdmin = async () => {
   const email = 'admin@printhub.com';
-  const password = 'admin123'; // default admin password
+  const password = 'admin123';
   const firstName = 'Admin';
   const lastName = 'User';
   const phone = '09123456789';
@@ -171,17 +210,14 @@ const createAdmin = async () => {
   const role = 0; // 0 = admin
 
   try {
-    // Check if admin already exists
     const [results] = await db.promise().query('SELECT * FROM users WHERE email = ?', [email]);
     if (results.length > 0) {
       console.log('Admin account already exists');
       return;
     }
 
-    // Hash the password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Insert admin
     await db.promise().query(
       'INSERT INTO users (first_name, last_name, phone, address, email, password, role) VALUES (?, ?, ?, ?, ?, ?, ?)',
       [firstName, lastName, phone, address, email, hashedPassword, role]
@@ -193,7 +229,6 @@ const createAdmin = async () => {
   }
 };
 
-// Call the function
 createAdmin();
 
 app.listen(PORT, () => {
