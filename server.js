@@ -28,6 +28,23 @@ db.connect(err => {
   console.log('Connected to MySQL database');
 });
 
+// ================================
+// ✅ ROLE MAPPING (UPDATED)
+// 0 = admin, 1 = staff, 2 = customer
+// ================================
+const roleToDb = (roleStr = "customer") => {
+  const r = (roleStr || "").toLowerCase();
+  if (r === "admin") return 0;
+  if (r === "staff") return 1;
+  return 2; // customer
+};
+
+const roleFromDb = (roleNum) => {
+  if (roleNum === 0) return "admin";
+  if (roleNum === 1) return "staff";
+  return "customer";
+};
+
 // ------------------ LOGIN ENDPOINT ------------------
 app.post('/api/login', (req, res) => {
   const { email, password } = req.body;
@@ -46,20 +63,138 @@ app.post('/api/login', (req, res) => {
       if (err) return res.status(500).json({ message: 'Error checking password' });
       if (!match) return res.status(400).json({ message: 'Incorrect password' });
 
+      // ✅ update last_login for Manage Accounts table
+      db.query('UPDATE users SET last_login = NOW() WHERE id = ?', [user.id]);
+
       res.json({
         message: 'Login successful',
         user: {
           id: user.id,
           email: user.email,
           firstName: user.first_name,
-          role: user.role === 0 ? 'admin' : 'user'
+          role: roleFromDb(user.role) // ✅ admin/staff/customer
         }
       });
     });
   });
 });
 
-// ------------------ OTP REGISTRATION ------------------
+// ================================
+// ✅ ADMIN MANAGE ACCOUNTS CRUD
+// (still same endpoints)
+// ================================
+
+// GET all users
+app.get('/api/admin/users', (req, res) => {
+  const q = `
+    SELECT 
+      id,
+      first_name,
+      last_name,
+      email,
+      role,
+      status,
+      last_login,
+      join_date
+    FROM users
+    ORDER BY id DESC
+  `;
+
+  db.query(q, (err, results) => {
+    if (err) return res.status(500).json({ message: 'Database error', error: err });
+
+    const mapped = results.map(r => ({
+      id: r.id,
+      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
+      email: r.email,
+      role: roleFromDb(r.role),
+      status: r.status || 'active',
+      lastLogin: r.last_login ? new Date(r.last_login).toLocaleDateString() : '',
+      joinDate: r.join_date ? new Date(r.join_date).toLocaleDateString() : '',
+    }));
+
+    res.json(mapped);
+  });
+});
+
+// CREATE user (admin adds)
+app.post('/api/admin/users', (req, res) => {
+  const { name, email, role = "customer", status = "active", password } = req.body;
+
+  if (!name || !email || !password) {
+    return res.status(400).json({ message: 'name, email, password are required' });
+  }
+
+  const parts = name.trim().split(/\s+/);
+  const firstName = parts[0] || '';
+  const lastName = parts.length > 1 ? parts.slice(1).join(' ') : '';
+
+  db.query('SELECT id FROM users WHERE email = ?', [email], (err, existing) => {
+    if (err) return res.status(500).json({ message: 'Database error', error: err });
+    if (existing.length > 0) return res.status(400).json({ message: 'Email already exists' });
+
+    bcrypt.hash(password, 10, (err, hashed) => {
+      if (err) return res.status(500).json({ message: 'Error hashing password' });
+
+      const insert = `
+        INSERT INTO users (first_name, last_name, email, password, role, status, join_date)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `;
+
+      const values = [
+        firstName,
+        lastName,
+        email,
+        hashed,
+        roleToDb(role),
+        status,
+        new Date().toISOString().slice(0, 10)
+      ];
+
+      db.query(insert, values, (err, result) => {
+        if (err) return res.status(500).json({ message: 'Database insert error', error: err });
+        res.json({ message: 'User created', id: result.insertId });
+      });
+    });
+  });
+});
+
+// UPDATE user
+app.put('/api/admin/users/:id', (req, res) => {
+  const { id } = req.params;
+  const { name, email, role, status } = req.body;
+
+  if (!name || !email) {
+    return res.status(400).json({ message: 'name and email are required' });
+  }
+
+  const parts = name.trim().split(/\s+/);
+  const firstName = parts[0] || '';
+  const lastName = parts.length > 1 ? parts.slice(1).join(' ') : '';
+
+  const update = `
+    UPDATE users
+    SET first_name = ?, last_name = ?, email = ?, role = ?, status = ?
+    WHERE id = ?
+  `;
+
+  db.query(update, [firstName, lastName, email, roleToDb(role), status, id], (err) => {
+    if (err) return res.status(500).json({ message: 'Database update error', error: err });
+    res.json({ message: 'User updated' });
+  });
+});
+
+// DELETE user
+app.delete('/api/admin/users/:id', (req, res) => {
+  const { id } = req.params;
+
+  db.query('DELETE FROM users WHERE id = ?', [id], (err) => {
+    if (err) return res.status(500).json({ message: 'Database delete error', error: err });
+    res.json({ message: 'User deleted' });
+  });
+});
+
+// otp ()
 const otpStore = {};
 
 const transporter = nodemailer.createTransport({
@@ -70,7 +205,7 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// ------------------ SEND OTP (REGISTRATION) ------------------
+// send otp (regis)
 app.post('/api/register/send-otp', (req, res) => {
   const { firstName, lastName, phone, address, email, password } = req.body;
 
@@ -140,7 +275,7 @@ app.post('/api/register/verify-otp', (req, res) => {
 
   const { firstName, lastName, phone = '', address = '', password } = record.data;
 
-  const role = 1;
+  const role = 2;
 
   db.query('SELECT id FROM users WHERE email = ?', [email], (err, results) => {
     if (err) return res.status(500).json({ message: 'Database error checking email', error: err.code });
@@ -171,12 +306,9 @@ app.post('/api/register/verify-otp', (req, res) => {
   });
 });
 
-// =====================================================
-// ✅ FORGOT PASSWORD OTP (NEW)
-// =====================================================
 const resetOtpStore = {};
 
-// SEND OTP (FORGOT PASSWORD)
+// send otp
 app.post('/api/password/send-otp', (req, res) => {
   const { email } = req.body;
 
@@ -208,7 +340,7 @@ app.post('/api/password/send-otp', (req, res) => {
   });
 });
 
-// VERIFY OTP (FORGOT PASSWORD)
+// verify otp
 app.post('/api/password/verify-otp', (req, res) => {
   const { email, otp } = req.body;
 
@@ -230,7 +362,7 @@ app.post('/api/password/verify-otp', (req, res) => {
   res.json({ message: 'OTP verified' });
 });
 
-// RESET PASSWORD (ONLY AFTER OTP VERIFIED)
+// reset pass
 app.post('/api/reset-password', (req, res) => {
   const { email, newPassword } = req.body;
 
@@ -255,7 +387,6 @@ app.post('/api/reset-password', (req, res) => {
   });
 });
 
-// ------------------ CREATE DEFAULT ADMIN ------------------
 const createAdmin = async () => {
   const email = 'admin@printhub.com';
   const password = 'admin123';
@@ -284,6 +415,78 @@ const createAdmin = async () => {
     console.error('Error creating admin account:', err);
   }
 };
+
+// profile
+app.get('/api/profile/:id', (req, res) => {
+  const { id } = req.params;
+
+  const q = `
+    SELECT id, first_name, last_name, email, birthday, gender, position
+    FROM users
+    WHERE id = ?
+    LIMIT 1
+  `;
+
+  db.query(q, [id], (err, results) => {
+    if (err) return res.status(500).json({ message: 'Database error', error: err });
+
+    if (results.length === 0) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const u = results[0];
+
+    res.json({
+      id: u.id,
+      firstName: u.first_name || '',
+      lastName: u.last_name || '',
+      email: u.email || '',
+      role: u.position || '',
+      birthday: u.birthday ? new Date(u.birthday).toISOString().slice(0, 10) : '',
+      gender: u.gender || '',
+    });
+  });
+});
+
+app.put('/api/profile/:id', (req, res) => {
+  const { id } = req.params;
+  const { firstName, lastName, email, birthday, gender, role } = req.body;
+
+  if (!firstName || !lastName || !email) {
+    return res.status(400).json({ message: 'firstName, lastName, and email are required' });
+  }
+
+  if (birthday && birthday.trim() !== '') {
+    const d = new Date(birthday);
+    if (Number.isNaN(d.getTime())) {
+      return res.status(400).json({ message: 'Invalid birthday date format' });
+    }
+
+    const year = d.getUTCFullYear();
+    if (year >= 2011) {
+      return res.status(400).json({ message: 'Birthday must be year 2010 or earlier' });
+    }
+  }
+
+  const update = `
+    UPDATE users
+    SET first_name = ?, last_name = ?, email = ?, birthday = ?, gender = ?, position = ?
+    WHERE id = ?
+  `;
+
+  const birthdayValue = birthday && birthday.trim() !== '' ? birthday : null;
+  const genderValue = gender && gender.trim() !== '' ? gender : null;
+  const positionValue = role && role.trim() !== '' ? role : null;
+
+  db.query(
+    update,
+    [firstName, lastName, email, birthdayValue, genderValue, positionValue, id],
+    (err) => {
+      if (err) return res.status(500).json({ message: 'Database update error', error: err });
+      return res.json({ message: 'Profile updated' });
+    }
+  );
+});
 
 createAdmin();
 
