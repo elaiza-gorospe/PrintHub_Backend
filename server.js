@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const express = require('express');
 const mysql = require('mysql2');
 const bodyParser = require('body-parser');
@@ -8,11 +10,9 @@ const nodemailer = require('nodemailer');
 const app = express();
 const PORT = 3000;
 
-// Middleware
 app.use(cors());
 app.use(bodyParser.json());
 
-// MySQL Connection
 const db = mysql.createConnection({
   host: '127.0.0.1',
   user: 'root',
@@ -22,474 +22,694 @@ const db = mysql.createConnection({
 
 db.connect(err => {
   if (err) {
-    console.error('Database connection failed:', err);
+    console.error("DB ERROR:", err);
     return;
   }
-  console.log('Connected to MySQL database');
+  console.log("Connected to MySQL");
 });
 
-// ================================
-// ✅ ROLE MAPPING (UPDATED)
-// 0 = admin, 1 = staff, 2 = customer
-// ================================
-const roleToDb = (roleStr = "customer") => {
-  const r = (roleStr || "").toLowerCase();
-  if (r === "admin") return 0;
-  if (r === "staff") return 1;
-  return 2; // customer
+const roleToDb = (role = "customer") => {
+  if (role === "admin") return 0;
+  if (role === "staff") return 1;
+  return 2;
 };
 
-const roleFromDb = (roleNum) => {
-  if (roleNum === 0) return "admin";
-  if (roleNum === 1) return "staff";
+const roleFromDb = (num) => {
+  if (num === 0) return "admin";
+  if (num === 1) return "staff";
   return "customer";
 };
 
-// ------------------ LOGIN ENDPOINT ------------------
-app.post('/api/login', (req, res) => {
+const otpStore = {};
+let transporter = null;
+
+if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+  transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
+    },
+  });
+
+  transporter.verify((err, success) => {
+    if (err) console.log("❌ Email transporter verify failed:", err);
+    else console.log("✅ Email transporter ready:", success);
+  });
+} else {
+  console.log("⚠️ EMAIL_USER/EMAIL_PASS not set. OTP will be logged to console (dev mode).");
+}
+
+// login
+app.post("/api/login", (req, res) => {
   const { email, password } = req.body;
 
-  if (!email || !password) {
-    return res.status(400).json({ message: 'Email and password are required' });
-  }
+  if (!email || !password)
+    return res.status(400).json({ message: "Email and password required" });
 
-  db.query('SELECT * FROM users WHERE email = ?', [email], (err, results) => {
-    if (err) return res.status(500).json({ message: 'Database error', error: err });
-    if (results.length === 0) return res.status(400).json({ message: 'Email not registered' });
+  // 1) check active users
+  db.query("SELECT * FROM users WHERE email=?", [email], (err, rows) => {
+    if (err) return res.status(500).json({ message: "Database error" });
 
-    const user = results[0];
+    if (rows.length > 0) {
+      const user = rows[0];
 
-    bcrypt.compare(password, user.password, (err, match) => {
-      if (err) return res.status(500).json({ message: 'Error checking password' });
-      if (!match) return res.status(400).json({ message: 'Incorrect password' });
+      return bcrypt.compare(password, user.password, (err2, match) => {
+        if (!match) return res.status(400).json({ message: "Incorrect password" });
 
-      // ✅ update last_login for Manage Accounts table
-      db.query('UPDATE users SET last_login = NOW() WHERE id = ?', [user.id]);
+        db.query("UPDATE users SET last_login=NOW() WHERE id=?", [user.id]);
 
-      res.json({
-        message: 'Login successful',
-        user: {
-          id: user.id,
-          email: user.email,
-          firstName: user.first_name,
-          role: roleFromDb(user.role) // ✅ admin/staff/customer
+        return res.json({
+          message: "Login successful",
+          user: {
+            id: user.id,
+            email: user.email,
+            firstName: user.first_name,
+            role: roleFromDb(user.role),
+          },
+        });
+      });
+    }
+
+    // 2) if not found in users, check archived_users
+    db.query("SELECT * FROM archived_users WHERE email=?", [email], (errA, arows) => {
+      if (errA) return res.status(500).json({ message: "Database error" });
+      if (arows.length === 0) return res.status(400).json({ message: "Email not registered" });
+
+      const archivedUser = arows[0];
+
+      bcrypt.compare(password, archivedUser.password, async (err2, match) => {
+        if (!match) return res.status(400).json({ message: "Incorrect password" });
+
+        // ✅ send reactivation OTP
+        const code = String(Math.floor(100000 + Math.random() * 900000));
+        const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+
+        otpStore[email] = { code, expiresAt, verifiedUntil: null, purpose: "reactivate" };
+
+        if (transporter) {
+          try {
+            await transporter.sendMail({
+              from: process.env.EMAIL_USER,
+              to: email,
+              subject: "Account Reactivation OTP",
+              text: `Your reactivation OTP is: ${code}. It expires in 5 minutes.`,
+            });
+          } catch (e) {
+            console.log("EMAIL SEND ERROR:", e);
+            return res.status(500).json({ message: "Failed to send reactivation OTP" });
+          }
+        } else {
+          console.log(`DEV Reactivation OTP for ${email}: ${code} (expires: ${expiresAt.toISOString()})`);
         }
+
+        return res.status(403).json({
+          message: "This account is archived. OTP sent for reactivation.",
+          needsReactivation: true,
+        });
       });
     });
   });
 });
 
-// ================================
-// ✅ ADMIN MANAGE ACCOUNTS CRUD
-// (still same endpoints)
-// ================================
 
-// GET all users
-app.get('/api/admin/users', (req, res) => {
-  const q = `
-    SELECT 
-      id,
-      first_name,
-      last_name,
-      email,
-      role,
-      status,
-      last_login,
-      join_date
-    FROM users
-    ORDER BY id DESC
-  `;
+app.post("/api/reactivate/verify-otp", (req, res) => {
+  const { email, otp } = req.body;
 
-  db.query(q, (err, results) => {
-    if (err) return res.status(500).json({ message: 'Database error', error: err });
+  if (!email || !otp) return res.status(400).json({ message: "Email and OTP required" });
 
-    const mapped = results.map(r => ({
-      id: r.id,
-      name: `${r.first_name || ''} ${r.last_name || ''}`.trim(),
-      email: r.email,
-      role: roleFromDb(r.role),
-      status: r.status || 'active',
-      lastLogin: r.last_login ? new Date(r.last_login).toLocaleDateString() : '',
-      joinDate: r.join_date ? new Date(r.join_date).toLocaleDateString() : '',
+  const entry = otpStore[email];
+  if (!entry || entry.purpose !== "reactivate") {
+    return res.status(400).json({ message: "No reactivation OTP request found. Try logging in again." });
+  }
+
+  const now = new Date();
+  if (now > entry.expiresAt) {
+    delete otpStore[email];
+    return res.status(400).json({ message: "OTP expired. Please login again to resend OTP." });
+  }
+
+  if (String(otp) !== entry.code) {
+    return res.status(400).json({ message: "Invalid OTP" });
+  }
+
+  // Move back from archived_users -> users
+  db.beginTransaction((err) => {
+    if (err) return res.status(500).json({ message: "DB transaction error" });
+
+    db.query("SELECT * FROM archived_users WHERE email=?", [email], (err1, rows) => {
+      if (err1) return db.rollback(() => res.status(500).json({ message: "DB error" }));
+      if (rows.length === 0)
+        return db.rollback(() => res.status(404).json({ message: "Archived account not found" }));
+
+      const u = rows[0];
+
+      db.query(
+        `INSERT INTO users
+         (id, first_name, last_name, phone, address, email, password, role, status, last_login, join_date, gender, birthday, position)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        [
+          u.id,
+          u.first_name,
+          u.last_name,
+          u.phone,
+          u.address,
+          u.email,
+          u.password,
+          u.role,
+          "active",       // ✅ reactivate as active
+          u.last_login,
+          u.join_date,
+          u.gender,
+          u.birthday,
+          u.position,
+        ],
+        (err2) => {
+          if (err2)
+            return db.rollback(() =>
+              res.status(500).json({ message: "Restore failed", error: err2 })
+            );
+
+          db.query("DELETE FROM archived_users WHERE email=?", [email], (err3) => {
+            if (err3)
+              return db.rollback(() =>
+                res.status(500).json({ message: "Archive cleanup failed", error: err3 })
+              );
+
+            db.commit((err4) => {
+              if (err4)
+                return db.rollback(() =>
+                  res.status(500).json({ message: "Commit failed", error: err4 })
+                );
+
+              delete otpStore[email];
+              return res.json({ message: "Account reactivated. Please login again.", reactivated: true });
+            });
+          });
+        }
+      );
+    });
+  });
+});
+
+
+
+// =================================================
+// REGISTER: SEND OTP  (UPDATED ONLY OTP LOGIC)
+// =================================================
+app.post('/api/register/send-otp', (req, res) => {
+  const { email } = req.body;
+
+  if (!email) return res.status(400).json({ message: "Email is required" });
+
+  db.query("SELECT id FROM users WHERE email=?", [email], async (err, rows) => {
+    if (err) return res.status(500).json({ message: "Database error" });
+    if (rows.length > 0) return res.status(400).json({ message: "Email already registered" });
+
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+
+    otpStore[email] = { code, expiresAt, verifiedUntil: null };
+
+    if (transporter) {
+      try {
+        await transporter.sendMail({
+          from: process.env.EMAIL_USER,
+          to: email,
+          subject: "Your OTP Code (Registration)",
+          text: `Your OTP is: ${code}. It expires in 5 minutes.`,
+        });
+        return res.status(200).json({ message: "OTP sent to your email." });
+      } catch (e) {
+        console.log("EMAIL SEND ERROR:", e);
+        return res.status(500).json({ message: "Failed to send OTP email" });
+      }
+    } else {
+      console.log(`DEV OTP for ${email}: ${code} (expires: ${expiresAt.toISOString()})`);
+      return res.status(200).json({ message: "OTP generated (dev mode). Check server console." });
+    }
+  });
+});
+
+// =================================================
+// REGISTER: VERIFY OTP (ADDED for User-otp.js)
+// =================================================
+app.post("/api/register/verify-otp", (req, res) => {
+  const { email, otp } = req.body;
+
+  if (!email || !otp) return res.status(400).json({ message: "Email and OTP required" });
+
+  const entry = otpStore[email];
+  if (!entry) return res.status(400).json({ message: "No OTP request found. Please resend OTP." });
+
+  const now = new Date();
+  if (now > entry.expiresAt) {
+    delete otpStore[email];
+    return res.status(400).json({ message: "OTP expired. Please resend OTP." });
+  }
+
+  if (String(otp) !== entry.code) {
+    return res.status(400).json({ message: "Invalid OTP" });
+  }
+
+  entry.verifiedUntil = new Date(Date.now() + 10 * 60 * 1000);
+  return res.json({ message: "OTP verified" });
+});
+
+// =================================================
+// NEW: SEND OTP (Password) - for frontend calling /api/password/send-otp
+// =================================================
+app.post("/api/password/send-otp", (req, res) => {
+  const { email } = req.body;
+
+  if (!email) return res.status(400).json({ message: "Email is required" });
+
+  db.query("SELECT id FROM users WHERE email=?", [email], async (err, rows) => {
+    if (err) return res.status(500).json({ message: "Database error" });
+    if (rows.length === 0) return res.status(404).json({ message: "Email not found" });
+
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
+
+    otpStore[email] = { code, expiresAt, verifiedUntil: null };
+
+    if (transporter) {
+      try {
+        await transporter.sendMail({
+          from: process.env.EMAIL_USER,
+          to: email,
+          subject: "Your OTP Code (Password Change)",
+          text: `Your OTP is: ${code}. It expires in 5 minutes.`,
+        });
+
+        return res.json({ message: "OTP sent to your email." });
+      } catch (e) {
+        console.log("EMAIL SEND ERROR:", e);
+        return res.status(500).json({ message: "Failed to send OTP email" });
+      }
+    } else {
+      console.log(`DEV OTP for ${email}: ${code} (expires: ${expiresAt.toISOString()})`);
+      return res.json({ message: "OTP generated (dev mode). Check server console." });
+    }
+  });
+});
+
+// registration
+app.post("/api/register/complete", (req, res) => {
+  const { firstName, lastName, email, phone, address, password } = req.body;
+
+  if (phone && !/^\+639\d{9}$/.test(phone)) {
+    return res.status(400).json({ message: "Phone must be +639 followed by 9 digits" });
+  }
+
+  if (!firstName || !lastName || !email || !password) {
+    return res.status(400).json({ message: "Missing required fields" });
+  }
+
+  const entry = otpStore[email];
+  if (!entry || !entry.verifiedUntil) {
+    return res.status(403).json({ message: "OTP verification required" });
+  }
+
+  if (new Date() > new Date(entry.verifiedUntil)) {
+    delete otpStore[email];
+    return res.status(403).json({ message: "OTP session expired. Please verify again." });
+  }
+
+  db.query("SELECT id FROM users WHERE email=?", [email], (err, rows) => {
+    if (err) return res.status(500).json({ message: "Database error" });
+    if (rows.length > 0) return res.status(400).json({ message: "Email already registered" });
+
+    bcrypt.hash(password, 10, (err, hash) => {
+      if (err) return res.status(500).json({ message: "Password hash error" });
+
+      db.query(
+        "INSERT INTO users(first_name,last_name,email,password,phone,address,role,join_date,status) VALUES(?,?,?,?,?,?,2,NOW(),'active')",
+        [firstName, lastName, email, hash, phone || "+63", address || ""],
+        (err2) => {
+          if (err2) return res.status(500).json({ message: "Registration failed" });
+
+          delete otpStore[email];
+          return res.json({ message: "Registration successful" });
+        }
+      );
+    });
+  });
+});
+
+// admin manage user
+app.get("/api/admin/users", (req, res) => {
+  db.query("SELECT * FROM users", (err, rows) => {
+    if (err) return res.status(500).json({ message: "DB error" });
+
+    const mapped = rows.map(u => ({
+      id: u.id,
+      name: `${u.first_name} ${u.last_name}`,
+      email: u.email,
+      role: roleFromDb(u.role),
+      status: u.status || "active",
+      lastLogin: u.last_login,
+      joinDate: u.join_date
     }));
 
     res.json(mapped);
   });
 });
-
-// CREATE user (admin adds)
-app.post('/api/admin/users', (req, res) => {
-  const { name, email, role = "customer", status = "active", password } = req.body;
-
-  if (!name || !email || !password) {
-    return res.status(400).json({ message: 'name, email, password are required' });
-  }
-
-  const parts = name.trim().split(/\s+/);
-  const firstName = parts[0] || '';
-  const lastName = parts.length > 1 ? parts.slice(1).join(' ') : '';
-
-  db.query('SELECT id FROM users WHERE email = ?', [email], (err, existing) => {
-    if (err) return res.status(500).json({ message: 'Database error', error: err });
-    if (existing.length > 0) return res.status(400).json({ message: 'Email already exists' });
-
-    bcrypt.hash(password, 10, (err, hashed) => {
-      if (err) return res.status(500).json({ message: 'Error hashing password' });
-
-      const insert = `
-        INSERT INTO users (first_name, last_name, email, password, role, status, join_date)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `;
-
-      const values = [
-        firstName,
-        lastName,
-        email,
-        hashed,
-        roleToDb(role),
-        status,
-        new Date().toISOString().slice(0, 10)
-      ];
-
-      db.query(insert, values, (err, result) => {
-        if (err) return res.status(500).json({ message: 'Database insert error', error: err });
-        res.json({ message: 'User created', id: result.insertId });
-      });
-    });
-  });
-});
-
-// UPDATE user
-app.put('/api/admin/users/:id', (req, res) => {
-  const { id } = req.params;
-  const { name, email, role, status } = req.body;
-
-  if (!name || !email) {
-    return res.status(400).json({ message: 'name and email are required' });
-  }
-
-  const parts = name.trim().split(/\s+/);
-  const firstName = parts[0] || '';
-  const lastName = parts.length > 1 ? parts.slice(1).join(' ') : '';
-
-  const update = `
-    UPDATE users
-    SET first_name = ?, last_name = ?, email = ?, role = ?, status = ?
-    WHERE id = ?
-  `;
-
-  db.query(update, [firstName, lastName, email, roleToDb(role), status, id], (err) => {
-    if (err) return res.status(500).json({ message: 'Database update error', error: err });
-    res.json({ message: 'User updated' });
-  });
-});
-
-// DELETE user
-app.delete('/api/admin/users/:id', (req, res) => {
-  const { id } = req.params;
-
-  db.query('DELETE FROM users WHERE id = ?', [id], (err) => {
-    if (err) return res.status(500).json({ message: 'Database delete error', error: err });
-    res.json({ message: 'User deleted' });
-  });
-});
-
-// otp ()
-const otpStore = {};
-
-const transporter = nodemailer.createTransport({
-  service: 'Gmail',
-  auth: {
-    user: 'aizducut@gmail.com',
-    pass: 'zvec ihfo tqaa huyw',
-  },
-});
-
-// send otp (regis)
-app.post('/api/register/send-otp', (req, res) => {
-  const { firstName, lastName, phone, address, email, password } = req.body;
-
-  if (!firstName || !lastName || !email || !password) {
-    return res.status(400).json({ message: 'Required fields missing' });
-  }
-
-  const nameRegex = /^[A-Za-z\s]+$/;
-  if (!nameRegex.test(firstName) || !nameRegex.test(lastName)) {
-    return res.status(400).json({ message: 'Name can only contain letters and spaces' });
-  }
-
-  const phoneRegex = /^\+63\d{10}$/;
-  if (!phoneRegex.test(phone)) {
-    return res.status(400).json({ message: 'Phone number must start with +63 and contain 10 digits after it' });
-  }
-
-  const uppercase = /[A-Z]/.test(password);
-  const number = /\d/.test(password);
-  const special = /[^A-Za-z0-9]/.test(password);
-  const length = password.length >= 8 && password.length <= 12;
-
-  if (!uppercase || !number || !special || !length) {
-    return res.status(400).json({ message: 'Password does not meet all criteria' });
-  }
-
-  db.query('SELECT * FROM users WHERE email = ?', [email], (err, results) => {
-    if (err) return res.status(500).json({ message: 'Database error', error: err });
-    if (results.length > 0) return res.status(400).json({ message: 'Email is already registered' });
-
-    const otp = Math.floor(100000 + Math.random() * 900000);
-
-    otpStore[email] = {
-      otp,
-      data: { firstName, lastName, phone, address, email, password },
-      expires: Date.now() + 5 * 60 * 1000
-    };
-
-    const mailOptions = {
-      from: 'aizducut@gmail.com',
-      to: email,
-      subject: 'Your PMG Registration OTP',
-      text: `Your OTP code is: ${otp}. It expires in 5 minutes.`,
-    };
-
-    transporter.sendMail(mailOptions, (err) => {
-      if (err) return res.status(500).json({ message: 'Failed to send OTP', error: err });
-      res.json({ message: 'OTP sent successfully' });
-    });
-  });
-});
-
-// ------------------ VERIFY OTP (REGISTRATION) ------------------
-app.post('/api/register/verify-otp', (req, res) => {
-  const { email, otp } = req.body;
-
-  if (!otpStore[email]) return res.status(400).json({ message: 'No OTP found or expired' });
-
-  const record = otpStore[email];
-
-  if (Date.now() > record.expires) {
-    delete otpStore[email];
-    return res.status(400).json({ message: 'OTP expired' });
-  }
-
-  if (parseInt(otp) !== record.otp) return res.status(400).json({ message: 'Incorrect OTP' });
-
-  const { firstName, lastName, phone = '', address = '', password } = record.data;
-
-  const role = 2;
-
-  db.query('SELECT id FROM users WHERE email = ?', [email], (err, results) => {
-    if (err) return res.status(500).json({ message: 'Database error checking email', error: err.code });
-    if (results.length > 0) {
-      delete otpStore[email];
-      return res.status(400).json({ message: 'Email already registered' });
-    }
-
-    bcrypt.hash(password, 10, (err, hashedPassword) => {
-      if (err) return res.status(500).json({ message: 'Error hashing password', error: err.message });
-
-      const insertQuery = `
-        INSERT INTO users (first_name, last_name, phone, address, email, password, role)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `;
-      const values = [firstName, lastName, phone, address, email, hashedPassword, role];
-
-      db.query(insertQuery, values, (err) => {
-        if (err) {
-          console.error('MySQL Insert Error:', err.code, err.sqlMessage);
-          return res.status(500).json({ message: 'Database insert error', error: err.code });
-        }
-
-        delete otpStore[email];
-        res.json({ message: 'User registered successfully' });
-      });
-    });
-  });
-});
-
-const resetOtpStore = {};
-
-// send otp
-app.post('/api/password/send-otp', (req, res) => {
-  const { email } = req.body;
-
-  if (!email) return res.status(400).json({ message: 'Email is required' });
-
-  db.query('SELECT id FROM users WHERE email = ?', [email], (err, results) => {
-    if (err) return res.status(500).json({ message: 'Database error', error: err });
-    if (results.length === 0) return res.status(400).json({ message: 'Email not registered' });
-
-    const otp = Math.floor(100000 + Math.random() * 900000);
-
-    resetOtpStore[email] = {
-      otp,
-      expires: Date.now() + 5 * 60 * 1000,
-      verified: false,
-    };
-
-    const mailOptions = {
-      from: 'aizducut@gmail.com',
-      to: email,
-      subject: 'Your Password Reset OTP',
-      text: `Your OTP code is: ${otp}. It expires in 5 minutes.`,
-    };
-
-    transporter.sendMail(mailOptions, (err) => {
-      if (err) return res.status(500).json({ message: 'Failed to send OTP', error: err });
-      res.json({ message: 'OTP sent successfully' });
-    });
-  });
-});
-
-// verify otp
-app.post('/api/password/verify-otp', (req, res) => {
-  const { email, otp } = req.body;
-
-  if (!email || !otp) return res.status(400).json({ message: 'Email and OTP are required' });
-  if (!resetOtpStore[email]) return res.status(400).json({ message: 'No OTP found or expired' });
-
-  const record = resetOtpStore[email];
-
-  if (Date.now() > record.expires) {
-    delete resetOtpStore[email];
-    return res.status(400).json({ message: 'OTP expired' });
-  }
-
-  if (parseInt(otp) !== record.otp) {
-    return res.status(400).json({ message: 'Incorrect OTP' });
-  }
-
-  resetOtpStore[email].verified = true;
-  res.json({ message: 'OTP verified' });
-});
-
-// reset pass
-app.post('/api/reset-password', (req, res) => {
-  const { email, newPassword } = req.body;
-
-  if (!email || !newPassword) {
-    return res.status(400).json({ message: 'Email and new password are required' });
-  }
-
-  const record = resetOtpStore[email];
-  if (!record || !record.verified) {
-    return res.status(403).json({ message: 'OTP not verified' });
-  }
-
-  bcrypt.hash(newPassword, 10, (err, hashedPassword) => {
-    if (err) return res.status(500).json({ message: 'Error hashing password' });
-
-    db.query('UPDATE users SET password = ? WHERE email = ?', [hashedPassword, email], (err) => {
-      if (err) return res.status(500).json({ message: 'Database error', error: err });
-
-      delete resetOtpStore[email];
-      res.json({ message: 'Password reset successful' });
-    });
-  });
-});
-
-const createAdmin = async () => {
-  const email = 'admin@printhub.com';
-  const password = 'admin123';
-  const firstName = 'Admin';
-  const lastName = 'User';
-  const phone = '09123456789';
-  const address = 'PrintHub Main Office';
-  const role = 0;
-
-  try {
-    const [results] = await db.promise().query('SELECT * FROM users WHERE email = ?', [email]);
-    if (results.length > 0) {
-      console.log('Admin account already exists');
-      return;
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    await db.promise().query(
-      'INSERT INTO users (first_name, last_name, phone, address, email, password, role) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [firstName, lastName, phone, address, email, hashedPassword, role]
+app.post("/api/admin/users", (req, res) => {
+  const { name, email, password, role } = req.body;
+
+  const parts = name.split(" ");
+  const first = parts[0];
+  const last = parts.slice(1).join(" ");
+
+  bcrypt.hash(password, 10, (err, hash) => {
+    db.query(
+      "INSERT INTO users(first_name,last_name,email,password,role) VALUES(?,?,?,?,?)",
+      [first, last, email, hash, roleToDb(role)],
+      () => res.json({ message: "User created" })
     );
-
-    console.log('Default admin account created successfully');
-  } catch (err) {
-    console.error('Error creating admin account:', err);
-  }
-};
-
-// profile
-app.get('/api/profile/:id', (req, res) => {
-  const { id } = req.params;
-
-  const q = `
-    SELECT id, first_name, last_name, email, birthday, gender, position
-    FROM users
-    WHERE id = ?
-    LIMIT 1
-  `;
-
-  db.query(q, [id], (err, results) => {
-    if (err) return res.status(500).json({ message: 'Database error', error: err });
-
-    if (results.length === 0) {
-      return res.status(404).json({ message: 'User not found' });
-    }
-
-    const u = results[0];
-
-    res.json({
-      id: u.id,
-      firstName: u.first_name || '',
-      lastName: u.last_name || '',
-      email: u.email || '',
-      role: u.position || '',
-      birthday: u.birthday ? new Date(u.birthday).toISOString().slice(0, 10) : '',
-      gender: u.gender || '',
-    });
   });
 });
 
-app.put('/api/profile/:id', (req, res) => {
-  const { id } = req.params;
-  const { firstName, lastName, email, birthday, gender, role } = req.body;
-
-  if (!firstName || !lastName || !email) {
-    return res.status(400).json({ message: 'firstName, lastName, and email are required' });
-  }
-
-  if (birthday && birthday.trim() !== '') {
-    const d = new Date(birthday);
-    if (Number.isNaN(d.getTime())) {
-      return res.status(400).json({ message: 'Invalid birthday date format' });
-    }
-
-    const year = d.getUTCFullYear();
-    if (year >= 2011) {
-      return res.status(400).json({ message: 'Birthday must be year 2010 or earlier' });
-    }
-  }
-
-  const update = `
-    UPDATE users
-    SET first_name = ?, last_name = ?, email = ?, birthday = ?, gender = ?, position = ?
-    WHERE id = ?
-  `;
-
-  const birthdayValue = birthday && birthday.trim() !== '' ? birthday : null;
-  const genderValue = gender && gender.trim() !== '' ? gender : null;
-  const positionValue = role && role.trim() !== '' ? role : null;
+app.put("/api/admin/users/:id", (req, res) => {
+  const { name, email, role, status } = req.body;
+  const parts = name.split(" ");
+  const first = parts[0];
+  const last = parts.slice(1).join(" ");
 
   db.query(
-    update,
-    [firstName, lastName, email, birthdayValue, genderValue, positionValue, id],
-    (err) => {
-      if (err) return res.status(500).json({ message: 'Database update error', error: err });
-      return res.json({ message: 'Profile updated' });
+    "UPDATE users SET first_name=?,last_name=?,email=?,role=?,status=? WHERE id=?",
+    [first, last, email, roleToDb(role), status, req.params.id],
+    () => res.json({ message: "User updated" })
+  );
+});
+
+app.delete("/api/admin/users/:id", (req, res) => {
+  const userId = req.params.id;
+
+  db.beginTransaction((err) => {
+    if (err) return res.status(500).json({ message: "DB transaction error" });
+
+    db.query("SELECT * FROM users WHERE id=?", [userId], (err1, rows) => {
+      if (err1) return db.rollback(() => res.status(500).json({ message: "DB error" }));
+      if (rows.length === 0)
+        return db.rollback(() => res.status(404).json({ message: "User not found" }));
+
+      const u = rows[0];
+
+      db.query(
+        `INSERT INTO archived_users
+         (user_id, first_name, last_name, phone, address, email, password, role, status, last_login, join_date, gender, birthday, position, archived_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,NOW())`,
+        [
+          u.id,
+          u.first_name,
+          u.last_name,
+          u.phone,
+          u.address,
+          u.email,
+          u.password,
+          u.role,
+          u.status,
+          u.last_login,
+          u.join_date,
+          u.gender,
+          u.birthday,
+          u.position,
+        ],
+        (err2) => {
+          if (err2) {
+            console.log("ARCHIVE INSERT ERROR:", err2);
+            return db.rollback(() =>
+              res.status(500).json({ message: "Archive insert failed", error: err2 })
+            );
+          }
+
+          db.query("DELETE FROM users WHERE id=?", [userId], (err3) => {
+            if (err3)
+              return db.rollback(() =>
+                res.status(500).json({ message: "Delete failed", error: err3 })
+              );
+
+            db.commit((err4) => {
+              if (err4)
+                return db.rollback(() =>
+                  res.status(500).json({ message: "Commit failed" })
+                );
+
+              return res.json({ message: "User archived" });
+            });
+          });
+        }
+      );
+    });
+  });
+});
+
+
+// user cus prof
+app.get("/api/user-profile/:id", (req, res) => {
+  db.query(
+    "SELECT first_name,last_name,birthday,gender,phone,address FROM users WHERE id=?",
+    [req.params.id],
+    (err, rows) => {
+      if (rows.length === 0)
+        return res.status(404).json({ message: "User not found" });
+
+      const u = rows[0];
+      res.json({
+        name: `${u.first_name} ${u.last_name}`,
+        birthday: u.birthday
+          ? new Date(u.birthday).toISOString().slice(0, 10)
+          : "",
+        gender: u.gender || "",
+        phone: u.phone || "+63",
+        address: u.address || ""
+      });
     }
   );
 });
 
-createAdmin();
+app.put("/api/user-profile/:id", (req, res) => {
+  const { name, email, birthday, gender, phone, address } = req.body;
 
+  if (!/^\+639\d{9}$/.test(phone))
+    return res
+      .status(400)
+      .json({ message: "Phone must be +639 followed by 9 digits" });
+
+  if (birthday) {
+    const y = new Date(birthday).getFullYear();
+    if (y > 2011)
+      return res
+        .status(400)
+        .json({ message: "Only users born in 2011 or earlier allowed" });
+  }
+
+  // if email is provided, validate format
+  if (email && !/\S+@\S+\.\S+/.test(String(email))) {
+    return res.status(400).json({ message: "Please enter a valid email address" });
+  }
+
+  const parts = String(name || "").split(" ");
+  const first = parts[0] || "";
+  const last = parts.slice(1).join(" ") || "";
+
+  // if email is provided, prevent duplicates (exclude same user id)
+  if (email) {
+    db.query(
+      "SELECT id FROM users WHERE email=? AND id<>?",
+      [email, req.params.id],
+      (errDup, rowsDup) => {
+        if (errDup) return res.status(500).json({ message: "Database error" });
+        if (rowsDup.length > 0) {
+          return res.status(400).json({ message: "Email already registered" });
+        }
+
+        db.query(
+          `UPDATE users 
+           SET first_name=?,last_name=?,email=?,birthday=?,gender=?,phone=?,address=?
+           WHERE id=?`,
+          [first, last, email, birthday, gender, phone, address, req.params.id],
+          () => res.json({ message: "Profile updated" })
+        );
+      }
+    );
+    return;
+  }
+
+  // if no email provided, keep old behavior
+  db.query(
+    `UPDATE users 
+     SET first_name=?,last_name=?,birthday=?,gender=?,phone=?,address=?
+     WHERE id=?`,
+    [first, last, birthday, gender, phone, address, req.params.id],
+    () => res.json({ message: "Profile updated" })
+  );
+});
+
+// req pass(change pass)
+app.post("/api/password/request-otp", (req, res) => {
+  const { email } = req.body;
+
+  if (!email) return res.status(400).json({ message: "Email is required" });
+
+  db.query("SELECT id FROM users WHERE email=?", [email], async (err, rows) => {
+    if (err) return res.status(500).json({ message: "Database error" });
+    if (rows.length === 0) return res.status(404).json({ message: "Email not found" });
+
+    const code = String(Math.floor(100000 + Math.random() * 900000)); // 6 digits
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+
+    otpStore[email] = { code, expiresAt, verifiedUntil: null };
+
+    if (transporter) {
+      try {
+        await transporter.sendMail({
+          from: process.env.EMAIL_USER,
+          to: email,
+          subject: "Your OTP Code (Password Change)",
+          text: `Your OTP is: ${code}. It expires in 5 minutes.`,
+        });
+
+        return res.json({ message: "OTP sent to your email." });
+      } catch (e) {
+        console.log("EMAIL SEND ERROR:", e);
+        return res.status(500).json({ message: "Failed to send OTP email" });
+      }
+    } else {
+      console.log(`DEV OTP for ${email}: ${code} (expires: ${expiresAt.toISOString()})`);
+      return res.json({ message: "OTP generated (dev mode). Check server console." });
+    }
+  });
+});
+
+// VERIFY OTP (for password change)
+app.post("/api/password/verify-otp", (req, res) => {
+  const { email, otp } = req.body;
+
+  if (!email || !otp) return res.status(400).json({ message: "Email and OTP required" });
+
+  const entry = otpStore[email];
+  if (!entry) return res.status(400).json({ message: "No OTP request found. Please resend OTP." });
+
+  const now = new Date();
+  if (now > entry.expiresAt) {
+    delete otpStore[email];
+    return res.status(400).json({ message: "OTP expired. Please resend OTP." });
+  }
+
+  if (String(otp) !== entry.code) {
+    return res.status(400).json({ message: "Invalid OTP" });
+  }
+
+  entry.verifiedUntil = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+  return res.json({ message: "OTP verified" });
+});
+
+app.post("/api/password/send-otp", (req, res) => {
+  req.url = "/api/password/request-otp";
+  app._router.handle(req, res);
+});
+
+
+
+// CHANGE PASSWORD (requires OTP verified)
+app.put("/api/profile/:id/password", (req, res) => {
+  const { currentPassword, newPassword } = req.body;
+
+  const upper = /[A-Z]/.test(newPassword);
+  const num = /\d/.test(newPassword);
+  const spec = /[^A-Za-z0-9]/.test(newPassword);
+  const len = newPassword.length >= 8 && newPassword.length <= 12;
+
+  if (!upper || !num || !spec || !len)
+    return res.status(400).json({ message: "Password weak" });
+
+  db.query(
+    "SELECT email,password FROM users WHERE id=?",
+    [req.params.id],
+    (err, rows) => {
+      if (err) return res.status(500).json({ message: "Database error" });
+      if (rows.length === 0) return res.status(404).json({ message: "User not found" });
+
+      const userEmail = rows[0].email;
+
+      const entry = otpStore[userEmail];
+      if (!entry || !entry.verifiedUntil) {
+        return res.status(403).json({ message: "OTP verification required" });
+      }
+
+      if (new Date() > new Date(entry.verifiedUntil)) {
+        delete otpStore[userEmail];
+        return res.status(403).json({ message: "OTP session expired. Please verify again." });
+      }
+
+      bcrypt.compare(currentPassword, rows[0].password, (err, match) => {
+        if (!match)
+          return res.status(400).json({ message: "Wrong password" });
+
+        bcrypt.hash(newPassword, 10, (err, hash) => {
+          db.query(
+            "UPDATE users SET password=? WHERE id=?",
+            [hash, req.params.id],
+            () => {
+              delete otpStore[userEmail];
+              res.json({ message: "Password changed" });
+            }
+          );
+        });
+      });
+    }
+  );
+});
+
+// reset pass
+app.post("/api/reset-password", (req, res) => {
+  const { email, newPassword } = req.body;
+
+  if (!email || !newPassword) {
+    return res.status(400).json({ message: "Email and newPassword are required" });
+  }
+
+  // require OTP verified first
+  const entry = otpStore[email];
+  if (!entry || !entry.verifiedUntil) {
+    return res.status(403).json({ message: "OTP verification required" });
+  }
+
+  if (new Date() > new Date(entry.verifiedUntil)) {
+    delete otpStore[email];
+    return res.status(403).json({ message: "OTP session expired. Please verify again." });
+  }
+
+  // same password rules
+  const upper = /[A-Z]/.test(newPassword);
+  const num = /\d/.test(newPassword);
+  const spec = /[^A-Za-z0-9]/.test(newPassword);
+  const len = newPassword.length >= 8 && newPassword.length <= 12;
+
+  if (!upper || !num || !spec || !len) {
+    return res.status(400).json({ message: "Password weak" });
+  }
+
+  // update password by email
+  bcrypt.hash(newPassword, 10, (err, hash) => {
+    if (err) return res.status(500).json({ message: "Password hash error" });
+
+    db.query("UPDATE users SET password=? WHERE email=?", [hash, email], (err2, result) => {
+      if (err2) return res.status(500).json({ message: "Database error" });
+      if (result.affectedRows === 0) return res.status(404).json({ message: "Email not found" });
+
+      // clear otp after success
+      delete otpStore[email];
+      return res.json({ message: "Password reset successful" });
+    });
+  });
+});
+
+
+// START SERVER
 app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`Server running at http://localhost:${PORT}`);
 });
