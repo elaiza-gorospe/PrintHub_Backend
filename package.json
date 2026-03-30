@@ -5,7 +5,10 @@
   "main": "db.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev --name init",
+    "prisma:studio": "prisma studio"
   },
   "keywords": [],
   "author": "",
@@ -16,6 +19,14 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "mysql2": "^3.16.2",
+    "@prisma/client": "^5.9.0",
+    "pg": "^8.11.0",
     "nodemailer": "^7.0.13"
+  },
+  "devDependencies": {
+    "prisma": "^5.9.0"
+  },
+  "prisma": {
+    "seed": "node prisma/seed.js"
   }
 }

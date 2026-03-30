@@ -1,0 +1,26 @@
+node_modules/
+/.env
+.env.*
+.env
+.DS_Store
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+/coverage
+/dist
+/build
+
+# Prisma artifacts
+/node_modules/.prisma/
+/.prisma
+
+# IDEs and editors
+.vscode/
+.idea/
+
+# OS files
+Thumbs.db
+ehthumbs.db
+
+# Logs
+.log

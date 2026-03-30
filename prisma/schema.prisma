@@ -1,0 +1,46 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          Int      @id @default(autoincrement())
+  first_name  String?  @map("first_name")
+  last_name   String?  @map("last_name")
+  email       String   @unique
+  password    String
+  phone       String?
+  address     String?
+  role        Int
+  status      String? 
+  last_login  DateTime? @map("last_login")
+  join_date   DateTime? @map("join_date")
+  gender      String?
+  birthday    DateTime?
+  position    String?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+}
+
+model ArchivedUser {
+  id          Int      @id @default(autoincrement())
+  user_id     Int?     @map("user_id")
+  first_name  String?  @map("first_name")
+  last_name   String?  @map("last_name")
+  phone       String?
+  address     String?
+  email       String
+  password    String
+  role        Int?
+  status      String?
+  last_login  DateTime?
+  join_date   DateTime?
+  gender      String?
+  birthday    DateTime?
+  position    String?
+  archived_at DateTime?
+}
