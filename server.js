@@ -118,12 +118,10 @@ app.post("/api/login", async (req, res) => {
       );
     }
 
-    return res
-      .status(403)
-      .json({
-        message: "This account is archived. OTP sent for reactivation.",
-        needsReactivation: true,
-      });
+    return res.status(403).json({
+      message: "This account is archived. OTP sent for reactivation.",
+      needsReactivation: true,
+    });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ message: "Database error" });
@@ -189,7 +187,9 @@ app.post("/api/reactivate/verify-otp", async (req, res) => {
     });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ message: "Restore failed", error: err.message });
+    return res
+      .status(500)
+      .json({ message: "Restore failed", error: err.message });
   }
 });
 
@@ -481,13 +481,15 @@ app.get("/api/user-profile/:id", (req, res) => {
     .then((u) => {
       if (!u) return res.status(404).json({ message: "User not found" });
       res.json({
+        id: u.id,
         name: `${u.first_name} ${u.last_name}`,
+        email: u.email || "",
+        phone: u.phone || "+63",
+        address: u.address || "",
+        gender: u.gender || "",
         birthday: u.birthday
           ? new Date(u.birthday).toISOString().slice(0, 10)
           : "",
-        gender: u.gender || "",
-        phone: u.phone || "+63",
-        address: u.address || "",
       });
     })
     .catch((e) => {
@@ -762,8 +764,10 @@ app.get("/api/products/:id", async (req, res) => {
 });
 
 app.post("/api/admin/products", async (req, res) => {
-  const { name, sku, description, price, stock, print_type, material } = req.body;
-  if (!name || !price) return res.status(400).json({ message: "Name and price required" });
+  const { name, sku, description, price, stock, print_type, material } =
+    req.body;
+  if (!name || !price)
+    return res.status(400).json({ message: "Name and price required" });
 
   try {
     const created = await prisma.product.create({
@@ -823,7 +827,9 @@ app.post("/api/orders", async (req, res) => {
   try {
     // fetch product prices
     const productIds = items.map((i) => i.productId);
-    const products = await prisma.product.findMany({ where: { id: { in: productIds } } });
+    const products = await prisma.product.findMany({
+      where: { id: { in: productIds } },
+    });
     const productMap = new Map(products.map((p) => [p.id, p]));
 
     let total = 0;
@@ -880,7 +886,10 @@ app.get("/api/orders/:id", async (req, res) => {
 app.get("/api/user/:id/orders", async (req, res) => {
   const userId = parseInt(req.params.id);
   try {
-    const orders = await prisma.order.findMany({ where: { userId }, include: { items: true } });
+    const orders = await prisma.order.findMany({
+      where: { userId },
+      include: { items: true },
+    });
     res.json(orders);
   } catch (e) {
     console.error(e);
@@ -890,7 +899,9 @@ app.get("/api/user/:id/orders", async (req, res) => {
 
 app.get("/api/admin/orders", async (req, res) => {
   try {
-    const orders = await prisma.order.findMany({ include: { items: true, user: true } });
+    const orders = await prisma.order.findMany({
+      include: { items: true, user: true },
+    });
     res.json(orders);
   } catch (e) {
     console.error(e);
@@ -1034,13 +1045,23 @@ app.put("/api/products/:id", async (req, res) => {
         ...(price && { price: parseFloat(price) }),
         ...(currency && { currency }),
         ...(stock !== undefined && { stock: parseInt(stock) }),
-        ...(width_mm !== undefined && { width_mm: width_mm ? parseInt(width_mm) : null }),
-        ...(height_mm !== undefined && { height_mm: height_mm ? parseInt(height_mm) : null }),
-        ...(depth_mm !== undefined && { depth_mm: depth_mm ? parseInt(depth_mm) : null }),
+        ...(width_mm !== undefined && {
+          width_mm: width_mm ? parseInt(width_mm) : null,
+        }),
+        ...(height_mm !== undefined && {
+          height_mm: height_mm ? parseInt(height_mm) : null,
+        }),
+        ...(depth_mm !== undefined && {
+          depth_mm: depth_mm ? parseInt(depth_mm) : null,
+        }),
         ...(material && { material }),
         ...(colorOptions && { colorOptions }),
         ...(print_type && { print_type }),
-        ...(turnaround_hours !== undefined && { turnaround_hours: turnaround_hours ? parseInt(turnaround_hours) : null }),
+        ...(turnaround_hours !== undefined && {
+          turnaround_hours: turnaround_hours
+            ? parseInt(turnaround_hours)
+            : null,
+        }),
         ...(images && { images }),
         ...(active !== undefined && { active }),
       },
@@ -1088,7 +1109,9 @@ app.post("/api/orders", async (req, res) => {
     }
 
     // Verify user exists
-    const user = await prisma.user.findUnique({ where: { id: parseInt(userId) } });
+    const user = await prisma.user.findUnique({
+      where: { id: parseInt(userId) },
+    });
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
@@ -1103,7 +1126,9 @@ app.post("/api/orders", async (req, res) => {
       });
 
       if (!product) {
-        return res.status(404).json({ message: `Product ${item.productId} not found` });
+        return res
+          .status(404)
+          .json({ message: `Product ${item.productId} not found` });
       }
 
       const unitPrice = parseFloat(product.price);
@@ -1171,7 +1196,13 @@ app.get("/api/orders/:id", async (req, res) => {
 // UPDATE order status
 app.put("/api/orders/:id", async (req, res) => {
   try {
-    const { status, proofApproved, due_date, shipping_address, billing_address } = req.body;
+    const {
+      status,
+      proofApproved,
+      due_date,
+      shipping_address,
+      billing_address,
+    } = req.body;
 
     const order = await prisma.order.update({
       where: { id: parseInt(req.params.id) },
@@ -1228,7 +1259,10 @@ app.delete("/api/orders/:orderId/items/:itemId", async (req, res) => {
 
     // Recalculate order total
     const items = await prisma.orderItem.findMany({ where: { orderId } });
-    const newTotal = items.reduce((sum, item) => sum + parseFloat(item.total_price), 0);
+    const newTotal = items.reduce(
+      (sum, item) => sum + parseFloat(item.total_price),
+      0,
+    );
 
     const updatedOrder = await prisma.order.update({
       where: { id: orderId },
