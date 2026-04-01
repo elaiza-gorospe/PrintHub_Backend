@@ -897,3 +897,352 @@ app.get("/api/admin/orders", async (req, res) => {
     res.status(500).json({ message: "DB error" });
   }
 });
+
+// =================================================
+// PRODUCTS API
+// =================================================
+
+// GET all products with pagination
+app.get("/api/products", async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+
+    const products = await prisma.product.findMany({
+      where: { active: true },
+      skip,
+      take: limit,
+      orderBy: { createdAt: "desc" },
+    });
+
+    const total = await prisma.product.count({ where: { active: true } });
+
+    res.json({
+      products,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch products" });
+  }
+});
+
+// GET single product by ID
+app.get("/api/products/:id", async (req, res) => {
+  try {
+    const product = await prisma.product.findUnique({
+      where: { id: parseInt(req.params.id) },
+      include: { orderItems: true },
+    });
+
+    if (!product) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    res.json(product);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch product" });
+  }
+});
+
+// CREATE new product (admin only)
+app.post("/api/products", async (req, res) => {
+  try {
+    const {
+      name,
+      sku,
+      description,
+      price,
+      currency,
+      stock,
+      width_mm,
+      height_mm,
+      depth_mm,
+      material,
+      colorOptions,
+      print_type,
+      turnaround_hours,
+      images,
+    } = req.body;
+
+    if (!name || !price) {
+      return res.status(400).json({ message: "Name and price are required" });
+    }
+
+    const product = await prisma.product.create({
+      data: {
+        name,
+        sku,
+        description,
+        price: parseFloat(price),
+        currency: currency || "PHP",
+        stock: parseInt(stock) || 0,
+        width_mm: width_mm ? parseInt(width_mm) : null,
+        height_mm: height_mm ? parseInt(height_mm) : null,
+        depth_mm: depth_mm ? parseInt(depth_mm) : null,
+        material,
+        colorOptions: colorOptions || [],
+        print_type,
+        turnaround_hours: turnaround_hours ? parseInt(turnaround_hours) : null,
+        images: images || [],
+        active: true,
+      },
+    });
+
+    res.status(201).json({ message: "Product created", product });
+  } catch (e) {
+    console.error(e);
+    if (e.code === "P2002") {
+      return res.status(400).json({ message: "SKU already exists" });
+    }
+    res.status(500).json({ message: "Failed to create product" });
+  }
+});
+
+// UPDATE product (admin only)
+app.put("/api/products/:id", async (req, res) => {
+  try {
+    const {
+      name,
+      description,
+      price,
+      currency,
+      stock,
+      width_mm,
+      height_mm,
+      depth_mm,
+      material,
+      colorOptions,
+      print_type,
+      turnaround_hours,
+      images,
+      active,
+    } = req.body;
+
+    const product = await prisma.product.update({
+      where: { id: parseInt(req.params.id) },
+      data: {
+        ...(name && { name }),
+        ...(description && { description }),
+        ...(price && { price: parseFloat(price) }),
+        ...(currency && { currency }),
+        ...(stock !== undefined && { stock: parseInt(stock) }),
+        ...(width_mm !== undefined && { width_mm: width_mm ? parseInt(width_mm) : null }),
+        ...(height_mm !== undefined && { height_mm: height_mm ? parseInt(height_mm) : null }),
+        ...(depth_mm !== undefined && { depth_mm: depth_mm ? parseInt(depth_mm) : null }),
+        ...(material && { material }),
+        ...(colorOptions && { colorOptions }),
+        ...(print_type && { print_type }),
+        ...(turnaround_hours !== undefined && { turnaround_hours: turnaround_hours ? parseInt(turnaround_hours) : null }),
+        ...(images && { images }),
+        ...(active !== undefined && { active }),
+      },
+    });
+
+    res.json({ message: "Product updated", product });
+  } catch (e) {
+    console.error(e);
+    if (e.code === "P2025") {
+      return res.status(404).json({ message: "Product not found" });
+    }
+    res.status(500).json({ message: "Failed to update product" });
+  }
+});
+
+// DELETE product (admin only - soft delete via active flag)
+app.delete("/api/products/:id", async (req, res) => {
+  try {
+    const product = await prisma.product.update({
+      where: { id: parseInt(req.params.id) },
+      data: { active: false },
+    });
+
+    res.json({ message: "Product deleted", product });
+  } catch (e) {
+    console.error(e);
+    if (e.code === "P2025") {
+      return res.status(404).json({ message: "Product not found" });
+    }
+    res.status(500).json({ message: "Failed to delete product" });
+  }
+});
+
+// =================================================
+// ORDERS API
+// =================================================
+
+// CREATE new order with items
+app.post("/api/orders", async (req, res) => {
+  try {
+    const { userId, items, shipping_address, billing_address } = req.body;
+
+    if (!userId || !items || items.length === 0) {
+      return res.status(400).json({ message: "userId and items are required" });
+    }
+
+    // Verify user exists
+    const user = await prisma.user.findUnique({ where: { id: parseInt(userId) } });
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Calculate total and create order with items
+    let total = 0;
+    const orderItems = [];
+
+    for (const item of items) {
+      const product = await prisma.product.findUnique({
+        where: { id: parseInt(item.productId) },
+      });
+
+      if (!product) {
+        return res.status(404).json({ message: `Product ${item.productId} not found` });
+      }
+
+      const unitPrice = parseFloat(product.price);
+      const quantity = parseInt(item.quantity) || 1;
+      const itemTotal = unitPrice * quantity;
+
+      total += itemTotal;
+
+      orderItems.push({
+        productId: parseInt(item.productId),
+        quantity,
+        unit_price: unitPrice,
+        total_price: itemTotal,
+        customizations: item.customizations || null,
+      });
+    }
+
+    // Create order with items in transaction
+    const order = await prisma.order.create({
+      data: {
+        userId: parseInt(userId),
+        total: parseFloat(total.toFixed(2)),
+        currency: "PHP",
+        status: "pending",
+        shipping_address,
+        billing_address,
+        items: {
+          create: orderItems,
+        },
+      },
+      include: { items: true, user: true },
+    });
+
+    res.status(201).json({ message: "Order created", order });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to create order" });
+  }
+});
+
+// GET order by ID
+app.get("/api/orders/:id", async (req, res) => {
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(req.params.id) },
+      include: {
+        items: {
+          include: { product: true },
+        },
+        user: true,
+      },
+    });
+
+    if (!order) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    res.json(order);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch order" });
+  }
+});
+
+// UPDATE order status
+app.put("/api/orders/:id", async (req, res) => {
+  try {
+    const { status, proofApproved, due_date, shipping_address, billing_address } = req.body;
+
+    const order = await prisma.order.update({
+      where: { id: parseInt(req.params.id) },
+      data: {
+        ...(status && { status }),
+        ...(proofApproved !== undefined && { proofApproved }),
+        ...(due_date && { due_date: new Date(due_date) }),
+        ...(shipping_address && { shipping_address }),
+        ...(billing_address && { billing_address }),
+      },
+      include: { items: true, user: true },
+    });
+
+    res.json({ message: "Order updated", order });
+  } catch (e) {
+    console.error(e);
+    if (e.code === "P2025") {
+      return res.status(404).json({ message: "Order not found" });
+    }
+    res.status(500).json({ message: "Failed to update order" });
+  }
+});
+
+// MARK order as delivered
+app.patch("/api/orders/:id/deliver", async (req, res) => {
+  try {
+    const order = await prisma.order.update({
+      where: { id: parseInt(req.params.id) },
+      data: {
+        status: "delivered",
+        delivered_at: new Date(),
+      },
+      include: { items: true, user: true },
+    });
+
+    res.json({ message: "Order marked as delivered", order });
+  } catch (e) {
+    console.error(e);
+    if (e.code === "P2025") {
+      return res.status(404).json({ message: "Order not found" });
+    }
+    res.status(500).json({ message: "Failed to deliver order" });
+  }
+});
+
+// DELETE order item
+app.delete("/api/orders/:orderId/items/:itemId", async (req, res) => {
+  try {
+    const orderId = parseInt(req.params.orderId);
+    const itemId = parseInt(req.params.itemId);
+
+    // Delete the item
+    await prisma.orderItem.delete({ where: { id: itemId } });
+
+    // Recalculate order total
+    const items = await prisma.orderItem.findMany({ where: { orderId } });
+    const newTotal = items.reduce((sum, item) => sum + parseFloat(item.total_price), 0);
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: orderId },
+      data: { total: newTotal },
+      include: { items: true, user: true },
+    });
+
+    res.json({ message: "Item removed from order", order: updatedOrder });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to remove item" });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`✅ Server running on http://localhost:${PORT}`);
+});
