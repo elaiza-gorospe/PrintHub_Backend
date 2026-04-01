@@ -130,7 +130,7 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-app.post("/api/reactivate/verify-otp", (req, res) => {
+app.post("/api/reactivate/verify-otp", async (req, res) => {
   const { email, otp } = req.body;
 
   if (!email || !otp)
