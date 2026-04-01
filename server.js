@@ -820,38 +820,55 @@ app.delete("/api/admin/products/:id", async (req, res) => {
 // Orders API
 // -------------------------
 app.post("/api/orders", async (req, res) => {
-  const { userId, items, shipping_address, billing_address } = req.body;
+  const { userId, items, shipping_address, billing_address, shippingCost } =
+    req.body;
+  
+  console.log("📦 Order received:", { userId, itemsCount: items?.length, shippingCost });
+  console.log("📋 Items detail:", JSON.stringify(items, null, 2));
+  
   if (!userId || !items || !Array.isArray(items) || items.length === 0)
     return res.status(400).json({ message: "Invalid order payload" });
 
   try {
-    // fetch product prices
+    // Verify products exist
     const productIds = items.map((i) => i.productId);
     const products = await prisma.product.findMany({
       where: { id: { in: productIds } },
     });
-    const productMap = new Map(products.map((p) => [p.id, p]));
 
-    let total = 0;
+    if (products.length !== productIds.length) {
+      return res
+        .status(400)
+        .json({ message: "One or more products not found" });
+    }
+
+    let itemsTotal = 0;
     const createItems = items.map((it) => {
-      const p = productMap.get(it.productId);
-      const unit = p ? parseFloat(p.price.toString()) : 0;
+      // Use unitPrice from frontend (what customer saw at checkout)
+      const unit = parseFloat(it.unitPrice || 0);
       const quantity = Number(it.quantity || 1);
       const itemTotal = unit * quantity;
-      total += itemTotal;
+      console.log(`  Item: productId=${it.productId}, unitPrice=${unit}, qty=${quantity}, itemTotal=${itemTotal}`);
+      itemsTotal += itemTotal;
       return {
         productId: it.productId,
         quantity,
-        unit_price: String(unit.toFixed(2)),
-        total_price: String(itemTotal.toFixed(2)),
+        unit_price: parseFloat(unit.toFixed(2)),
+        total_price: parseFloat(itemTotal.toFixed(2)),
         customizations: it.customizations || {},
       };
     });
 
+    // Add shipping to total
+    const shipping = parseFloat(shippingCost || 0);
+    const total = itemsTotal + shipping;
+    
+    console.log(`💰 Calculation: itemsTotal=${itemsTotal}, shipping=${shipping}, total=${total}`);
+
     const order = await prisma.order.create({
       data: {
         userId,
-        total: String(total.toFixed(2)),
+        total: parseFloat(total.toFixed(2)),
         currency: "PHP",
         status: "pending",
         shipping_address,
@@ -861,9 +878,10 @@ app.post("/api/orders", async (req, res) => {
       include: { items: true },
     });
 
+    console.log(`✅ Order created: ID=${order.id}, total=${order.total}`);
     res.json({ message: "Order created", order });
   } catch (e) {
-    console.error(e);
+    console.error("❌ Order creation failed:", e.message);
     res.status(500).json({ message: "Order creation failed" });
   }
 });
