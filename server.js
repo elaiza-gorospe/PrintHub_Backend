@@ -2,7 +2,6 @@ require("dotenv").config();
 
 const express = require("express");
 const prisma = require("./db/prisma");
-const mysql = require("mysql2");
 const bodyParser = require("body-parser");
 const cors = require("cors");
 const bcrypt = require("bcrypt");
@@ -13,21 +12,6 @@ const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(bodyParser.json());
-
-const db = mysql.createConnection({
-  host: process.env.DB_HOST || "127.0.0.1",
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "",
-  database: process.env.DB_NAME || "printhub_db",
-});
-
-db.connect((err) => {
-  if (err) {
-    console.error("DB ERROR:", err);
-  } else {
-    console.log("Connected to MySQL");
-  }
-});
 
 const roleToDb = (role = "customer") => {
   if (role === "admin") return 0;
@@ -171,85 +155,42 @@ app.post("/api/reactivate/verify-otp", (req, res) => {
     return res.status(400).json({ message: "Invalid OTP" });
   }
 
-  // Move back from archived_users -> users
-  db.beginTransaction((err) => {
-    if (err) return res.status(500).json({ message: "DB transaction error" });
+  // Move back from archived_users -> users (Prisma transaction)
+  try {
+    const u = await prisma.archivedUser.findUnique({ where: { email } });
+    if (!u)
+      return res.status(404).json({ message: "Archived account not found" });
 
-    db.query(
-      "SELECT * FROM archived_users WHERE email=?",
-      [email],
-      (err1, rows) => {
-        if (err1)
-          return db.rollback(() =>
-            res.status(500).json({ message: "DB error" }),
-          );
-        if (rows.length === 0)
-          return db.rollback(() =>
-            res.status(404).json({ message: "Archived account not found" }),
-          );
+    await prisma.$transaction([
+      prisma.user.create({
+        data: {
+          first_name: u.first_name,
+          last_name: u.last_name,
+          phone: u.phone,
+          address: u.address,
+          email: u.email,
+          password: u.password,
+          role: u.role ?? 2,
+          status: "active",
+          last_login: u.last_login,
+          join_date: u.join_date,
+          gender: u.gender,
+          birthday: u.birthday,
+          position: u.position,
+        },
+      }),
+      prisma.archivedUser.delete({ where: { email } }),
+    ]);
 
-        const u = rows[0];
-
-        db.query(
-          `INSERT INTO users
-         (id, first_name, last_name, phone, address, email, password, role, status, last_login, join_date, gender, birthday, position)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-          [
-            u.id,
-            u.first_name,
-            u.last_name,
-            u.phone,
-            u.address,
-            u.email,
-            u.password,
-            u.role,
-            "active", // ✅ reactivate as active
-            u.last_login,
-            u.join_date,
-            u.gender,
-            u.birthday,
-            u.position,
-          ],
-          (err2) => {
-            if (err2)
-              return db.rollback(() =>
-                res
-                  .status(500)
-                  .json({ message: "Restore failed", error: err2 }),
-              );
-
-            db.query(
-              "DELETE FROM archived_users WHERE email=?",
-              [email],
-              (err3) => {
-                if (err3)
-                  return db.rollback(() =>
-                    res
-                      .status(500)
-                      .json({ message: "Archive cleanup failed", error: err3 }),
-                  );
-
-                db.commit((err4) => {
-                  if (err4)
-                    return db.rollback(() =>
-                      res
-                        .status(500)
-                        .json({ message: "Commit failed", error: err4 }),
-                    );
-
-                  delete otpStore[email];
-                  return res.json({
-                    message: "Account reactivated. Please login again.",
-                    reactivated: true,
-                  });
-                });
-              },
-            );
-          },
-        );
-      },
-    );
-  });
+    delete otpStore[email];
+    return res.json({
+      message: "Account reactivated. Please login again.",
+      reactivated: true,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ message: "Restore failed", error: err.message });
+  }
 });
 
 // =================================================
@@ -328,18 +269,15 @@ app.post("/api/register/verify-otp", (req, res) => {
   return res.json({ message: "OTP verified" });
 });
 
-// =================================================
-// NEW: SEND OTP (Password) - for frontend calling /api/password/send-otp
-// =================================================
-app.post("/api/password/send-otp", (req, res) => {
+// replaced MySQL-based OTP check with Prisma-based handler below
+app.post("/api/password/send-otp", async (req, res) => {
   const { email } = req.body;
 
   if (!email) return res.status(400).json({ message: "Email is required" });
 
-  db.query("SELECT id FROM users WHERE email=?", [email], async (err, rows) => {
-    if (err) return res.status(500).json({ message: "Database error" });
-    if (rows.length === 0)
-      return res.status(404).json({ message: "Email not found" });
+  try {
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) return res.status(404).json({ message: "Email not found" });
 
     const code = String(Math.floor(100000 + Math.random() * 900000));
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
@@ -368,7 +306,10 @@ app.post("/api/password/send-otp", (req, res) => {
         message: "OTP generated (dev mode). Check server console.",
       });
     }
-  });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ message: "Database error" });
+  }
 });
 
 // registration
@@ -792,4 +733,167 @@ app.post("/api/reset-password", async (req, res) => {
 // START SERVER
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
+});
+
+// -------------------------
+// Products API
+// -------------------------
+app.get("/api/products", async (req, res) => {
+  try {
+    const products = await prisma.product.findMany();
+    res.json(products);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "DB error" });
+  }
+});
+
+app.get("/api/products/:id", async (req, res) => {
+  try {
+    const p = await prisma.product.findUnique({
+      where: { id: parseInt(req.params.id) },
+    });
+    if (!p) return res.status(404).json({ message: "Product not found" });
+    res.json(p);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "DB error" });
+  }
+});
+
+app.post("/api/admin/products", async (req, res) => {
+  const { name, sku, description, price, stock, print_type, material } = req.body;
+  if (!name || !price) return res.status(400).json({ message: "Name and price required" });
+
+  try {
+    const created = await prisma.product.create({
+      data: {
+        name,
+        sku,
+        description,
+        price: String(price),
+        stock: stock || 0,
+        print_type,
+        material,
+      },
+    });
+    res.json({ message: "Product created", product: created });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Create failed" });
+  }
+});
+
+app.put("/api/admin/products/:id", async (req, res) => {
+  const id = parseInt(req.params.id);
+  try {
+    const updated = await prisma.product.update({
+      where: { id },
+      data: {
+        ...req.body,
+        price: req.body.price ? String(req.body.price) : undefined,
+      },
+    });
+    res.json({ message: "Product updated", product: updated });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Update failed" });
+  }
+});
+
+app.delete("/api/admin/products/:id", async (req, res) => {
+  const id = parseInt(req.params.id);
+  try {
+    await prisma.product.delete({ where: { id } });
+    res.json({ message: "Product deleted" });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Delete failed" });
+  }
+});
+
+// -------------------------
+// Orders API
+// -------------------------
+app.post("/api/orders", async (req, res) => {
+  const { userId, items, shipping_address, billing_address } = req.body;
+  if (!userId || !items || !Array.isArray(items) || items.length === 0)
+    return res.status(400).json({ message: "Invalid order payload" });
+
+  try {
+    // fetch product prices
+    const productIds = items.map((i) => i.productId);
+    const products = await prisma.product.findMany({ where: { id: { in: productIds } } });
+    const productMap = new Map(products.map((p) => [p.id, p]));
+
+    let total = 0;
+    const createItems = items.map((it) => {
+      const p = productMap.get(it.productId);
+      const unit = p ? parseFloat(p.price.toString()) : 0;
+      const quantity = Number(it.quantity || 1);
+      const itemTotal = unit * quantity;
+      total += itemTotal;
+      return {
+        productId: it.productId,
+        quantity,
+        unit_price: String(unit.toFixed(2)),
+        total_price: String(itemTotal.toFixed(2)),
+        customizations: it.customizations || {},
+      };
+    });
+
+    const order = await prisma.order.create({
+      data: {
+        userId,
+        total: String(total.toFixed(2)),
+        currency: "PHP",
+        status: "pending",
+        shipping_address,
+        billing_address,
+        items: { create: createItems },
+      },
+      include: { items: true },
+    });
+
+    res.json({ message: "Order created", order });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Order creation failed" });
+  }
+});
+
+app.get("/api/orders/:id", async (req, res) => {
+  const id = parseInt(req.params.id);
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id },
+      include: { items: { include: { product: true } }, user: true },
+    });
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    res.json(order);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "DB error" });
+  }
+});
+
+app.get("/api/user/:id/orders", async (req, res) => {
+  const userId = parseInt(req.params.id);
+  try {
+    const orders = await prisma.order.findMany({ where: { userId }, include: { items: true } });
+    res.json(orders);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "DB error" });
+  }
+});
+
+app.get("/api/admin/orders", async (req, res) => {
+  try {
+    const orders = await prisma.order.findMany({ include: { items: true, user: true } });
+    res.json(orders);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "DB error" });
+  }
 });

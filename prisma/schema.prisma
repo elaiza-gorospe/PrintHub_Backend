@@ -24,6 +24,7 @@ model User {
   position    String?
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
+  orders       Order[]
 }
 
 model ArchivedUser {
@@ -44,3 +45,58 @@ model ArchivedUser {
   position    String?
   archived_at DateTime?
 }
+
+model Product {
+  id           Int       @id @default(autoincrement())
+  name         String
+  sku          String?   @unique
+  description  String?
+  price        Decimal   @db.Decimal(12,2)
+  currency     String    @default("PHP")
+  stock        Int       @default(0)
+  width_mm     Int?
+  height_mm    Int?
+  depth_mm     Int?
+  material     String?
+  colorOptions String[]  @default([])
+  print_type   String?   // e.g. digital, offset, screen
+  turnaround_hours Int?
+  images       String[]  @default([])
+  active       Boolean   @default(true)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  orderItems   OrderItem[]
+}
+
+model Order {
+  id              Int         @id @default(autoincrement())
+  user            User?       @relation(fields: [userId], references: [id])
+  userId          Int?
+  total           Decimal     @db.Decimal(14,2)
+  currency        String      @default("PHP")
+  status          String      @default("pending")
+  shipping_address String?
+  billing_address String?
+  proofApproved   Boolean     @default(false)
+  due_date        DateTime?
+  delivered_at    DateTime?
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+
+  items           OrderItem[]
+}
+
+model OrderItem {
+  id           Int      @id @default(autoincrement())
+  order        Order    @relation(fields: [orderId], references: [id])
+  orderId      Int
+  product      Product  @relation(fields: [productId], references: [id])
+  productId    Int
+  quantity     Int      @default(1)
+  unit_price   Decimal  @db.Decimal(14,2)
+  total_price  Decimal  @db.Decimal(14,2)
+  customizations Json?
+  createdAt    DateTime @default(now())
+}
+
