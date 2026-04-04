@@ -738,94 +738,19 @@ app.listen(PORT, () => {
 });
 
 // -------------------------
-// Products API
-// -------------------------
-app.get("/api/products", async (req, res) => {
-  try {
-    const products = await prisma.product.findMany();
-    res.json(products);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ message: "DB error" });
-  }
-});
-
-app.get("/api/products/:id", async (req, res) => {
-  try {
-    const p = await prisma.product.findUnique({
-      where: { id: parseInt(req.params.id) },
-    });
-    if (!p) return res.status(404).json({ message: "Product not found" });
-    res.json(p);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ message: "DB error" });
-  }
-});
-
-app.post("/api/admin/products", async (req, res) => {
-  const { name, sku, description, price, stock, print_type, material } =
-    req.body;
-  if (!name || !price)
-    return res.status(400).json({ message: "Name and price required" });
-
-  try {
-    const created = await prisma.product.create({
-      data: {
-        name,
-        sku,
-        description,
-        price: String(price),
-        stock: stock || 0,
-        print_type,
-        material,
-      },
-    });
-    res.json({ message: "Product created", product: created });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ message: "Create failed" });
-  }
-});
-
-app.put("/api/admin/products/:id", async (req, res) => {
-  const id = parseInt(req.params.id);
-  try {
-    const updated = await prisma.product.update({
-      where: { id },
-      data: {
-        ...req.body,
-        price: req.body.price ? String(req.body.price) : undefined,
-      },
-    });
-    res.json({ message: "Product updated", product: updated });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ message: "Update failed" });
-  }
-});
-
-app.delete("/api/admin/products/:id", async (req, res) => {
-  const id = parseInt(req.params.id);
-  try {
-    await prisma.product.delete({ where: { id } });
-    res.json({ message: "Product deleted" });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ message: "Delete failed" });
-  }
-});
-
-// -------------------------
 // Orders API
 // -------------------------
 app.post("/api/orders", async (req, res) => {
   const { userId, items, shipping_address, billing_address, shippingCost } =
     req.body;
-  
-  console.log("📦 Order received:", { userId, itemsCount: items?.length, shippingCost });
+
+  console.log("📦 Order received:", {
+    userId,
+    itemsCount: items?.length,
+    shippingCost,
+  });
   console.log("📋 Items detail:", JSON.stringify(items, null, 2));
-  
+
   if (!userId || !items || !Array.isArray(items) || items.length === 0)
     return res.status(400).json({ message: "Invalid order payload" });
 
@@ -848,7 +773,9 @@ app.post("/api/orders", async (req, res) => {
       const unit = parseFloat(it.unitPrice || 0);
       const quantity = Number(it.quantity || 1);
       const itemTotal = unit * quantity;
-      console.log(`  Item: productId=${it.productId}, unitPrice=${unit}, qty=${quantity}, itemTotal=${itemTotal}`);
+      console.log(
+        `  Item: productId=${it.productId}, unitPrice=${unit}, qty=${quantity}, itemTotal=${itemTotal}`,
+      );
       itemsTotal += itemTotal;
       return {
         productId: it.productId,
@@ -862,8 +789,10 @@ app.post("/api/orders", async (req, res) => {
     // Add shipping to total
     const shipping = parseFloat(shippingCost || 0);
     const total = itemsTotal + shipping;
-    
-    console.log(`💰 Calculation: itemsTotal=${itemsTotal}, shipping=${shipping}, total=${total}`);
+
+    console.log(
+      `💰 Calculation: itemsTotal=${itemsTotal}, shipping=${shipping}, total=${total}`,
+    );
 
     const order = await prisma.order.create({
       data: {
@@ -893,7 +822,8 @@ app.get("/api/orders/:id", async (req, res) => {
       where: { id },
       include: { items: { include: { product: true } }, user: true },
     });
-    if (!order) return res.status(404).json({ message: "Order not found" });
+    if (!order || order.deleted_at)
+      return res.status(404).json({ message: "Order not found" });
     res.json(order);
   } catch (e) {
     console.error(e);
@@ -905,7 +835,7 @@ app.get("/api/user/:id/orders", async (req, res) => {
   const userId = parseInt(req.params.id);
   try {
     const orders = await prisma.order.findMany({
-      where: { userId },
+      where: { userId, deleted_at: null },
       include: { items: true },
     });
     res.json(orders);
@@ -918,6 +848,7 @@ app.get("/api/user/:id/orders", async (req, res) => {
 app.get("/api/admin/orders", async (req, res) => {
   try {
     const orders = await prisma.order.findMany({
+      where: { deleted_at: null },
       include: { items: true, user: true },
     });
     res.json(orders);
@@ -939,13 +870,15 @@ app.get("/api/products", async (req, res) => {
     const skip = (page - 1) * limit;
 
     const products = await prisma.product.findMany({
-      where: { active: true },
+      where: { active: true, deleted_at: null },
       skip,
       take: limit,
       orderBy: { createdAt: "desc" },
     });
 
-    const total = await prisma.product.count({ where: { active: true } });
+    const total = await prisma.product.count({
+      where: { active: true, deleted_at: null },
+    });
 
     res.json({
       products,
@@ -970,7 +903,7 @@ app.get("/api/products/:id", async (req, res) => {
       include: { orderItems: true },
     });
 
-    if (!product) {
+    if (!product || product.deleted_at) {
       return res.status(404).json({ message: "Product not found" });
     }
 
@@ -1095,12 +1028,12 @@ app.put("/api/products/:id", async (req, res) => {
   }
 });
 
-// DELETE product (admin only - soft delete via active flag)
+// DELETE product (soft delete via deleted_at field)
 app.delete("/api/products/:id", async (req, res) => {
   try {
     const product = await prisma.product.update({
       where: { id: parseInt(req.params.id) },
-      data: { active: false },
+      data: { deleted_at: new Date() },
     });
 
     res.json({ message: "Product deleted", product });
@@ -1200,7 +1133,7 @@ app.get("/api/orders/:id", async (req, res) => {
       },
     });
 
-    if (!order) {
+    if (!order || order.deleted_at) {
       return res.status(404).json({ message: "Order not found" });
     }
 
@@ -1263,6 +1196,25 @@ app.patch("/api/orders/:id/deliver", async (req, res) => {
       return res.status(404).json({ message: "Order not found" });
     }
     res.status(500).json({ message: "Failed to deliver order" });
+  }
+});
+
+// DELETE order (soft delete)
+app.delete("/api/orders/:id", async (req, res) => {
+  try {
+    const order = await prisma.order.update({
+      where: { id: parseInt(req.params.id) },
+      data: { deleted_at: new Date() },
+      include: { items: true, user: true },
+    });
+
+    res.json({ message: "Order deleted", order });
+  } catch (e) {
+    console.error(e);
+    if (e.code === "P2025") {
+      return res.status(404).json({ message: "Order not found" });
+    }
+    res.status(500).json({ message: "Failed to delete order" });
   }
 });
 
