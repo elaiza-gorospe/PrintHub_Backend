@@ -3,8 +3,9 @@ services:
     name: printhub-api
     env: node
     plan: free
-    buildCommand: npm install && npx prisma generate && npx prisma migrate deploy
-    startCommand: npm start
+    numInstances: 1
+    buildCommand: npm install --production && npx prisma generate
+    startCommand: node server.js
     envVars:
       - key: NODE_ENV
         value: production

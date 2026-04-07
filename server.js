@@ -1247,6 +1247,19 @@ app.delete("/api/orders/:orderId/items/:itemId", async (req, res) => {
   }
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ Server running on port ${PORT}`);
-});
+// Start server with migrations
+(async () => {
+  try {
+    // Run database migrations
+    const { execSync } = require("child_process");
+    console.log("Running Prisma migrations...");
+    execSync("npx prisma migrate deploy", { stdio: "inherit" });
+    console.log("✅ Migrations completed");
+  } catch (e) {
+    console.log("⚠️ Migration warning (may already be up to date):", e.message);
+  }
+
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`✅ Server running on port ${PORT}`);
+  });
+})();
