@@ -1008,14 +1008,11 @@ app.put("/api/inquiries/:id", async (req, res) => {
     const inquiry = await prisma.inquiry.update({
       where: { id: inquiryId },
       data: {
-        ...(status && { status }),
+        // If a quoted_price is being set, auto-promote to "quoted" unless admin explicitly set a different status
+        status: status || (newPrice ? "quoted" : undefined) || existing.status,
         ...(newPrice !== undefined && { quoted_price: newPrice }),
         ...(admin_notes !== undefined && { admin_notes }),
-        ...(orderId &&
-          !existing.order_id && {
-            order_id: orderId,
-            status: status || "quoted",
-          }),
+        ...(orderId && !existing.order_id && { order_id: orderId }),
       },
     });
     res.json({ message: "Inquiry updated", inquiry });
