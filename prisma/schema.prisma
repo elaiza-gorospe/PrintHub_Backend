@@ -60,6 +60,13 @@ model Product {
   depth_mm     Int?
   material     String?
   colorOptions String[]  @default([])
+  color_options      String[]  @default([])
+  size_options       String[]  @default([])
+  material_options   String[]  @default([])
+  side_options       String[]  @default([])
+  finishing_options  String[]  @default([])
+  processing_options String[]  @default([])
+  delivery_options   String[]  @default([])
   print_type   String?   // e.g. digital, offset, screen
   turnaround_hours Int?
   images       String[]  @default([])
@@ -81,6 +88,7 @@ model Order {
   shipping_address String?
   billing_address String?
   proofApproved   Boolean     @default(false)
+  payment_status  String      @default("unpaid")
   due_date        DateTime?
   delivered_at    DateTime?
   createdAt       DateTime    @default(now()) @map("created_at")
@@ -123,6 +131,7 @@ model Inquiry {
   status        String    @default("new")
   quoted_price  Decimal?  @db.Decimal(14,2)
   admin_notes   String?
+  order_id      Int?
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 }

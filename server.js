@@ -957,15 +957,65 @@ app.get("/api/inquiries/:id", async (req, res) => {
 // PUT /api/inquiries/:id — admin: update status / quoted_price / admin_notes
 app.put("/api/inquiries/:id", async (req, res) => {
   const { status, quoted_price, admin_notes } = req.body;
+  const inquiryId = parseInt(req.params.id);
   try {
+    // Fetch current state to detect first-time quoted_price set
+    const existing = await prisma.inquiry.findUnique({
+      where: { id: inquiryId },
+    });
+    if (!existing)
+      return res.status(404).json({ message: "Inquiry not found" });
+
+    const newPrice =
+      quoted_price !== undefined
+        ? quoted_price
+          ? parseFloat(quoted_price)
+          : null
+        : undefined;
+
+    // Auto-create order when a price is first set and no order exists yet
+    let orderId = existing.order_id;
+    if (newPrice && !existing.order_id) {
+      const summary = [
+        existing.product_title && `Product: ${existing.product_title}`,
+        existing.quantity && `Qty: ${existing.quantity}`,
+        existing.size && `Size: ${existing.size}`,
+        existing.color && `Color: ${existing.color}`,
+        existing.material && `Material: ${existing.material}`,
+        existing.finishing && `Finishing: ${existing.finishing}`,
+        existing.printing && `Printing: ${existing.printing}`,
+        existing.processing && `Processing: ${existing.processing}`,
+        existing.delivery && `Delivery: ${existing.delivery}`,
+        existing.other && `Other: ${existing.other}`,
+      ]
+        .filter(Boolean)
+        .join(" | ");
+
+      const order = await prisma.order.create({
+        data: {
+          userId: existing.userId || null,
+          total: newPrice,
+          currency: "PHP",
+          status: "pending",
+          payment_status: "awaiting_payment",
+          shipping_address: summary || "Custom inquiry order",
+          billing_address: `Inquiry #${inquiryId} — ${existing.name} <${existing.email}>`,
+        },
+      });
+      orderId = order.id;
+    }
+
     const inquiry = await prisma.inquiry.update({
-      where: { id: parseInt(req.params.id) },
+      where: { id: inquiryId },
       data: {
         ...(status && { status }),
-        ...(quoted_price !== undefined && {
-          quoted_price: quoted_price ? parseFloat(quoted_price) : null,
-        }),
+        ...(newPrice !== undefined && { quoted_price: newPrice }),
         ...(admin_notes !== undefined && { admin_notes }),
+        ...(orderId &&
+          !existing.order_id && {
+            order_id: orderId,
+            status: status || "quoted",
+          }),
       },
     });
     res.json({ message: "Inquiry updated", inquiry });
