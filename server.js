@@ -973,9 +973,9 @@ app.put("/api/inquiries/:id", async (req, res) => {
           : null
         : undefined;
 
-    // Auto-create order when a price is first set and no order exists yet
+    // Auto-create order only when: price first set, no order yet, AND current status is "new"
     let orderId = existing.order_id;
-    if (newPrice && !existing.order_id) {
+    if (newPrice && !existing.order_id && existing.status === "new") {
       const summary = [
         existing.product_title && `Product: ${existing.product_title}`,
         existing.quantity && `Qty: ${existing.quantity}`,
@@ -1008,8 +1008,13 @@ app.put("/api/inquiries/:id", async (req, res) => {
     const inquiry = await prisma.inquiry.update({
       where: { id: inquiryId },
       data: {
-        // If a quoted_price is being set, auto-promote to "quoted" unless admin explicitly set a different status
-        status: status || (newPrice ? "quoted" : undefined) || existing.status,
+        // Auto-set to "converted" when price is first set on a "new" inquiry, unless admin passed explicit status
+        status:
+          status ||
+          (newPrice && !existing.order_id && existing.status === "new"
+            ? "converted"
+            : undefined) ||
+          existing.status,
         ...(newPrice !== undefined && { quoted_price: newPrice }),
         ...(admin_notes !== undefined && { admin_notes }),
         ...(orderId && !existing.order_id && { order_id: orderId }),
