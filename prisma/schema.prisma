@@ -25,6 +25,7 @@ model User {
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")
   orders       Order[]
+  inquiries    Inquiry[]
 }
 
 model ArchivedUser {
@@ -100,5 +101,29 @@ model OrderItem {
   total_price  Decimal  @db.Decimal(14,2)
   customizations Json?
   createdAt    DateTime @default(now())
+}
+
+model Inquiry {
+  id            Int       @id @default(autoincrement())
+  userId        Int?      @map("user_id")
+  user          User?     @relation(fields: [userId], references: [id])
+  product_title String?
+  subject       String
+  name          String
+  email         String
+  quantity      String?
+  size          String?
+  color         String?
+  material      String?
+  finishing     String?
+  printing      String?
+  processing    String?
+  delivery      String?
+  other         String?
+  status        String    @default("new")
+  quoted_price  Decimal?  @db.Decimal(14,2)
+  admin_notes   String?
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
 }
 

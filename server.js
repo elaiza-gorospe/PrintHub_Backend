@@ -859,6 +859,139 @@ app.get("/api/admin/orders", async (req, res) => {
 });
 
 // =================================================
+// INQUIRIES API
+// =================================================
+
+// POST /api/inquiries — customer submits a quote request
+app.post("/api/inquiries", async (req, res) => {
+  const {
+    userId,
+    product_title,
+    subject,
+    name,
+    email,
+    quantity,
+    size,
+    color,
+    material,
+    finishing,
+    printing,
+    processing,
+    delivery,
+    other,
+  } = req.body;
+
+  if (!subject || !name || !email) {
+    return res
+      .status(400)
+      .json({ message: "Subject, name, and email are required" });
+  }
+
+  try {
+    const inquiry = await prisma.inquiry.create({
+      data: {
+        userId: userId ? parseInt(userId) : null,
+        product_title,
+        subject,
+        name,
+        email,
+        quantity,
+        size,
+        color,
+        material,
+        finishing,
+        printing,
+        processing,
+        delivery,
+        other,
+        status: "new",
+      },
+    });
+    res.status(201).json({ message: "Inquiry submitted", inquiry });
+  } catch (e) {
+    console.error("Inquiry creation failed:", e);
+    res.status(500).json({ message: "Failed to submit inquiry" });
+  }
+});
+
+// GET /api/inquiries — admin: list all inquiries (optionally filter by status)
+app.get("/api/inquiries", async (req, res) => {
+  const { status } = req.query;
+  try {
+    const inquiries = await prisma.inquiry.findMany({
+      where: status ? { status } : {},
+      include: {
+        user: {
+          select: { id: true, first_name: true, last_name: true, email: true },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json(inquiries);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch inquiries" });
+  }
+});
+
+// GET /api/inquiries/:id — admin: single inquiry detail
+app.get("/api/inquiries/:id", async (req, res) => {
+  try {
+    const inquiry = await prisma.inquiry.findUnique({
+      where: { id: parseInt(req.params.id) },
+      include: {
+        user: {
+          select: { id: true, first_name: true, last_name: true, email: true },
+        },
+      },
+    });
+    if (!inquiry) return res.status(404).json({ message: "Inquiry not found" });
+    res.json(inquiry);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch inquiry" });
+  }
+});
+
+// PUT /api/inquiries/:id — admin: update status / quoted_price / admin_notes
+app.put("/api/inquiries/:id", async (req, res) => {
+  const { status, quoted_price, admin_notes } = req.body;
+  try {
+    const inquiry = await prisma.inquiry.update({
+      where: { id: parseInt(req.params.id) },
+      data: {
+        ...(status && { status }),
+        ...(quoted_price !== undefined && {
+          quoted_price: quoted_price ? parseFloat(quoted_price) : null,
+        }),
+        ...(admin_notes !== undefined && { admin_notes }),
+      },
+    });
+    res.json({ message: "Inquiry updated", inquiry });
+  } catch (e) {
+    console.error(e);
+    if (e.code === "P2025")
+      return res.status(404).json({ message: "Inquiry not found" });
+    res.status(500).json({ message: "Failed to update inquiry" });
+  }
+});
+
+// GET /api/user/:id/inquiries — customer: own inquiries
+app.get("/api/user/:id/inquiries", async (req, res) => {
+  const userId = parseInt(req.params.id);
+  try {
+    const inquiries = await prisma.inquiry.findMany({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json(inquiries);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch inquiries" });
+  }
+});
+
+// =================================================
 // PRODUCTS API
 // =================================================
 
