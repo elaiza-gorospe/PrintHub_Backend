@@ -1075,6 +1075,7 @@ app.put("/api/inquiries/:id/convert", async (req, res) => {
           total: inquiry.quoted_price,
           currency: "PHP",
           status: "pending",
+          payment_status: "awaiting_payment",
           shipping_address: summary || "Custom inquiry order",
           billing_address: `Inquiry #${inquiry.id} — ${inquiry.name} <${inquiry.email}>`,
         },
