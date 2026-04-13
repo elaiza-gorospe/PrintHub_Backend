@@ -991,6 +991,63 @@ app.get("/api/user/:id/inquiries", async (req, res) => {
   }
 });
 
+// PUT /api/inquiries/:id/convert — admin: convert accepted inquiry to an order
+app.put("/api/inquiries/:id/convert", async (req, res) => {
+  const inquiryId = parseInt(req.params.id);
+  try {
+    const inquiry = await prisma.inquiry.findUnique({
+      where: { id: inquiryId },
+    });
+    if (!inquiry) return res.status(404).json({ message: "Inquiry not found" });
+    if (!inquiry.quoted_price)
+      return res.status(400).json({ message: "Inquiry has no quoted price" });
+    if (inquiry.status === "converted")
+      return res.status(400).json({ message: "Inquiry already converted" });
+
+    // Build a summary of what was quoted for the order notes
+    const summary = [
+      inquiry.product_title && `Product: ${inquiry.product_title}`,
+      inquiry.quantity && `Qty: ${inquiry.quantity}`,
+      inquiry.size && `Size: ${inquiry.size}`,
+      inquiry.color && `Color: ${inquiry.color}`,
+      inquiry.material && `Material: ${inquiry.material}`,
+      inquiry.finishing && `Finishing: ${inquiry.finishing}`,
+      inquiry.printing && `Printing: ${inquiry.printing}`,
+      inquiry.processing && `Processing: ${inquiry.processing}`,
+      inquiry.delivery && `Delivery: ${inquiry.delivery}`,
+      inquiry.other && `Other: ${inquiry.other}`,
+    ]
+      .filter(Boolean)
+      .join(" | ");
+
+    const [order] = await prisma.$transaction([
+      prisma.order.create({
+        data: {
+          userId: inquiry.userId || null,
+          total: inquiry.quoted_price,
+          currency: "PHP",
+          status: "pending",
+          shipping_address: summary || "Custom inquiry order",
+          billing_address: `Inquiry #${inquiry.id} — ${inquiry.name} <${inquiry.email}>`,
+        },
+      }),
+      prisma.inquiry.update({
+        where: { id: inquiryId },
+        data: { status: "converted" },
+      }),
+    ]);
+
+    res.json({
+      message: "Inquiry converted to order",
+      orderId: order.id,
+      order,
+    });
+  } catch (e) {
+    console.error("Inquiry convert failed:", e);
+    res.status(500).json({ message: "Failed to convert inquiry" });
+  }
+});
+
 // =================================================
 // PRODUCTS API
 // =================================================
