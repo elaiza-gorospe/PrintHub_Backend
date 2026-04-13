@@ -28,7 +28,10 @@ const roleFromDb = (num) => {
 const otpStore = {};
 let transporter = null;
 
-if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+// SMTP disabled — set to true and configure EMAIL_USER/EMAIL_PASS to enable
+const SMTP_ENABLED = false;
+
+if (SMTP_ENABLED && process.env.EMAIL_USER && process.env.EMAIL_PASS) {
   transporter = nodemailer.createTransport({
     service: "gmail",
     auth: {
@@ -42,9 +45,7 @@ if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
     else console.log("✅ Email transporter ready:", success);
   });
 } else {
-  console.log(
-    "⚠️ EMAIL_USER/EMAIL_PASS not set. OTP will be logged to console (dev mode).",
-  );
+  console.log("⚠️ SMTP disabled. OTP will be logged to console (dev mode).");
 }
 
 // login
