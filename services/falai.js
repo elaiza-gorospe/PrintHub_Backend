@@ -47,14 +47,9 @@ async function generateWithPollinations(prompt, imageSize) {
     `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
     `?width=${width}&height=${height}&seed=${seed}&nologo=true&model=flux`;
 
-  console.log(`[Pollinations] Generating: ${url}`);
+  console.log(`[Pollinations] Generated URL: ${url}`);
 
-  // Verify the URL is reachable (HEAD request — no image download needed here)
-  const check = await fetch(url, { method: "HEAD" });
-  if (!check.ok) {
-    throw new Error(`Pollinations.AI error: ${check.status}`);
-  }
-
+  // Return URL directly — Pollinations generates on first browser load, no pre-check needed
   return { url, width, height, seed };
 }
 

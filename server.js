@@ -1629,7 +1629,20 @@ app.post("/api/builder/generate", async (req, res) => {
       imageSize: imageSize || "square_hd",
     });
 
-    // Download generated image and persist in Supabase
+    // In mock/Pollinations mode the URL is returned directly — skip Supabase storage
+    // (Pollinations generates the image lazily on first browser request)
+    if (process.env.FAL_MOCK === "true") {
+      console.log(`✅ [Mock] Returning Pollinations URL directly`);
+      return res.json({
+        url: result.url,
+        width: result.width,
+        height: result.height,
+        seed: result.seed,
+        stored: false,
+      });
+    }
+
+    // Download generated image and persist in Supabase (production only)
     await ensureBucket();
 
     const imgRes = await fetch(result.url);
