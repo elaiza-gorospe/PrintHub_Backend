@@ -1525,6 +1525,12 @@ async function ensureBucket() {
       fileSizeLimit: MAX_UPLOAD_SIZE,
     });
     if (error) throw new Error(`Cannot create storage bucket: ${error.message}`);
+  } else if (!existing.public) {
+    // Bucket exists but is private — make it public
+    const { error } = await supabase.storage.updateBucket(BUILDER_BUCKET, {
+      public: true,
+    });
+    if (error) throw new Error(`Cannot update bucket visibility: ${error.message}`);
   }
 }
 
