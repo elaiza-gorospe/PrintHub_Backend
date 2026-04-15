@@ -6,6 +6,9 @@ const bodyParser = require("body-parser");
 const cors = require("cors");
 const bcrypt = require("bcrypt");
 const nodemailer = require("nodemailer");
+const multer = require("multer");
+const supabase = require("./db/supabase");
+const { generateImage } = require("./services/falai");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1488,6 +1491,181 @@ app.delete("/api/orders/:orderId/items/:itemId", async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ message: "Failed to remove item" });
+  }
+});
+
+// =================================================
+// AI BUILDER API
+// =================================================
+const BUILDER_BUCKET = "printhub_s3";
+const MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10 MB
+const ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const GENERATION_COOLDOWN_MS = 30_000; // 30 s per user
+const generationCooldown = {}; // userId -> lastGeneratedAt (ms)
+
+// Multer: memory storage, size + type guard
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_UPLOAD_SIZE },
+  fileFilter: (_req, file, cb) => {
+    if (ALLOWED_MIME.has(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only JPEG, PNG, WebP, and GIF images are allowed"));
+    }
+  },
+});
+
+/** Ensure the storage bucket exists and is public */
+async function ensureBucket() {
+  const { data: existing } = await supabase.storage.getBucket(BUILDER_BUCKET);
+  if (!existing) {
+    const { error } = await supabase.storage.createBucket(BUILDER_BUCKET, {
+      public: true,
+      fileSizeLimit: MAX_UPLOAD_SIZE,
+    });
+    if (error) throw new Error(`Cannot create storage bucket: ${error.message}`);
+  }
+}
+
+/** Extract userId from X-User-Id header; returns null when missing/invalid */
+function getUserId(req) {
+  const raw = req.headers["x-user-id"];
+  if (!raw) return null;
+  const id = parseInt(raw, 10);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+// POST /api/builder/upload — upload a source asset to Supabase storage
+app.post(
+  "/api/builder/upload",
+  upload.single("file"),
+  async (req, res) => {
+    const userId = getUserId(req);
+    if (!userId)
+      return res.status(401).json({ message: "Authentication required: send X-User-Id header" });
+
+    if (!req.file)
+      return res.status(400).json({ message: "No file provided" });
+
+    try {
+      await ensureBucket();
+
+      const ext = req.file.mimetype.split("/")[1] || "jpg";
+      const path = `uploads/${userId}/${Date.now()}.${ext}`;
+
+      const { error } = await supabase.storage
+        .from(BUILDER_BUCKET)
+        .upload(path, req.file.buffer, {
+          contentType: req.file.mimetype,
+          upsert: false,
+        });
+
+      if (error) throw new Error(`Storage upload failed: ${error.message}`);
+
+      const { data: urlData } = supabase.storage
+        .from(BUILDER_BUCKET)
+        .getPublicUrl(path);
+
+      return res.status(201).json({
+        url: urlData.publicUrl,
+        path,
+        size: req.file.size,
+        mimeType: req.file.mimetype,
+      });
+    } catch (e) {
+      console.error("Builder upload error:", e.message);
+      return res.status(500).json({ message: e.message || "Upload failed" });
+    }
+  }
+);
+
+// Multer error handler for builder upload
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError || (err && ALLOWED_MIME !== undefined && req.path === "/api/builder/upload")) {
+    return res.status(400).json({ message: err.message });
+  }
+  next(err);
+});
+
+// POST /api/builder/generate — generate an image via fal.ai and store in Supabase
+app.post("/api/builder/generate", async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId)
+    return res.status(401).json({ message: "Authentication required: send X-User-Id header" });
+
+  const { prompt, model, imageSize } = req.body;
+  if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0)
+    return res.status(400).json({ message: "prompt is required" });
+
+  if (prompt.trim().length > 1000)
+    return res.status(400).json({ message: "prompt must be 1000 characters or fewer" });
+
+  // Per-user cooldown
+  const now = Date.now();
+  const last = generationCooldown[userId] || 0;
+  const remaining = GENERATION_COOLDOWN_MS - (now - last);
+  if (remaining > 0) {
+    return res.status(429).json({
+      message: `Please wait ${Math.ceil(remaining / 1000)} seconds before generating again`,
+      retryAfterMs: remaining,
+    });
+  }
+
+  generationCooldown[userId] = now;
+
+  try {
+    console.log(`🎨 Builder generate: userId=${userId}, prompt="${prompt.slice(0, 80)}..."`);
+
+    const result = await generateImage({
+      prompt: prompt.trim(),
+      model: model || undefined,
+      imageSize: imageSize || "square_hd",
+    });
+
+    // Download generated image and persist in Supabase
+    await ensureBucket();
+
+    const imgRes = await fetch(result.url);
+    if (!imgRes.ok) throw new Error("Failed to fetch generated image from fal.ai");
+    const imgBuffer = Buffer.from(await imgRes.arrayBuffer());
+
+    const storagePath = `generated/${userId}/${Date.now()}.jpg`;
+    const { error: storageErr } = await supabase.storage
+      .from(BUILDER_BUCKET)
+      .upload(storagePath, imgBuffer, { contentType: "image/jpeg", upsert: false });
+
+    if (storageErr) {
+      // Non-fatal: return the fal.ai URL directly if storage fails
+      console.warn("Storage persist failed, returning fal.ai URL:", storageErr.message);
+      return res.json({
+        url: result.url,
+        width: result.width,
+        height: result.height,
+        seed: result.seed,
+        stored: false,
+      });
+    }
+
+    const { data: urlData } = supabase.storage
+      .from(BUILDER_BUCKET)
+      .getPublicUrl(storagePath);
+
+    console.log(`✅ Generated + stored: ${storagePath}`);
+    return res.json({
+      url: urlData.publicUrl,
+      falUrl: result.url,
+      width: result.width,
+      height: result.height,
+      seed: result.seed,
+      stored: true,
+      path: storagePath,
+    });
+  } catch (e) {
+    // Reset cooldown on failure so user can retry
+    delete generationCooldown[userId];
+    console.error("Builder generate error:", e.message);
+    return res.status(500).json({ message: e.message || "Generation failed" });
   }
 });
 
