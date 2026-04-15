@@ -840,7 +840,13 @@ app.get("/api/user/:id/orders", async (req, res) => {
   try {
     const orders = await prisma.order.findMany({
       where: { userId, deleted_at: null },
-      include: { items: true },
+      include: {
+        items: {
+          include: {
+            product: { select: { id: true, name: true, images: true } },
+          },
+        },
+      },
     });
     res.json(orders);
   } catch (e) {
@@ -853,7 +859,14 @@ app.get("/api/admin/orders", async (req, res) => {
   try {
     const orders = await prisma.order.findMany({
       where: { deleted_at: null },
-      include: { items: true, user: true },
+      include: {
+        items: {
+          include: {
+            product: { select: { id: true, name: true, images: true } },
+          },
+        },
+        user: true,
+      },
     });
     res.json(orders);
   } catch (e) {
