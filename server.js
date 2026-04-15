@@ -1629,24 +1629,15 @@ app.post("/api/builder/generate", async (req, res) => {
       imageSize: imageSize || "square_hd",
     });
 
-    // In mock/Pollinations mode the URL is returned directly — skip Supabase storage
-    // (Pollinations generates the image lazily on first browser request)
-    if (process.env.FAL_MOCK === "true") {
-      console.log(`✅ [Mock] Returning Pollinations URL directly`);
-      return res.json({
-        url: result.url,
-        width: result.width,
-        height: result.height,
-        seed: result.seed,
-        stored: false,
-      });
-    }
-
-    // Download generated image and persist in Supabase (production only)
+    // Download generated image and persist in Supabase (both mock and production)
+    // In mock mode Pollinations generates lazily — fetching server-side waits for the real image.
+    // Returning a Supabase URL to the browser avoids the blank-placeholder race condition.
     await ensureBucket();
 
+    const sourceLabel = process.env.FAL_MOCK === "true" ? "Pollinations" : "fal.ai";
+    console.log(`⬇️  Fetching generated image from ${sourceLabel}…`);
     const imgRes = await fetch(result.url);
-    if (!imgRes.ok) throw new Error("Failed to fetch generated image from fal.ai");
+    if (!imgRes.ok) throw new Error(`Failed to fetch generated image from ${sourceLabel}`);
     const imgBuffer = Buffer.from(await imgRes.arrayBuffer());
 
     const storagePath = `generated/${userId}/${Date.now()}.jpg`;
@@ -1655,8 +1646,8 @@ app.post("/api/builder/generate", async (req, res) => {
       .upload(storagePath, imgBuffer, { contentType: "image/jpeg", upsert: false });
 
     if (storageErr) {
-      // Non-fatal: return the fal.ai URL directly if storage fails
-      console.warn("Storage persist failed, returning fal.ai URL:", storageErr.message);
+      // Non-fatal: return the source URL directly if Supabase storage fails
+      console.warn("Storage persist failed, returning source URL:", storageErr.message);
       return res.json({
         url: result.url,
         width: result.width,
