@@ -68,6 +68,8 @@ model Product {
   finishing_options  String[]  @default([])
   processing_options String[]  @default([])
   delivery_options   String[]  @default([])
+  quantity_options   String[]  @default([])
+  shipping_options   String[]  @default([])
   print_type   String?   // e.g. digital, offset, screen
   turnaround_hours Int?
   images       String[]  @default([])

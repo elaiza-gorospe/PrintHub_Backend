@@ -1189,6 +1189,15 @@ app.post("/api/products", async (req, res) => {
       depth_mm,
       material,
       colorOptions,
+      color_options,
+      size_options,
+      material_options,
+      side_options,
+      finishing_options,
+      processing_options,
+      delivery_options,
+      quantity_options,
+      shipping_options,
       print_type,
       turnaround_hours,
       images,
@@ -1210,7 +1219,16 @@ app.post("/api/products", async (req, res) => {
         height_mm: height_mm ? parseInt(height_mm) : null,
         depth_mm: depth_mm ? parseInt(depth_mm) : null,
         material,
-        colorOptions: colorOptions || [],
+        colorOptions: colorOptions || color_options || [],
+        color_options: color_options || colorOptions || [],
+        size_options: size_options || [],
+        material_options: material_options || [],
+        side_options: side_options || [],
+        finishing_options: finishing_options || [],
+        processing_options: processing_options || [],
+        delivery_options: delivery_options || [],
+        quantity_options: quantity_options || [],
+        shipping_options: shipping_options || [],
         print_type,
         turnaround_hours: turnaround_hours ? parseInt(turnaround_hours) : null,
         images: images || [],
@@ -1242,17 +1260,28 @@ app.put("/api/products/:id", async (req, res) => {
       depth_mm,
       material,
       colorOptions,
+      color_options,
+      size_options,
+      material_options,
+      side_options,
+      finishing_options,
+      processing_options,
+      delivery_options,
+      quantity_options,
+      shipping_options,
       print_type,
       turnaround_hours,
       images,
       active,
+      sku,
     } = req.body;
 
     const product = await prisma.product.update({
       where: { id: parseInt(req.params.id) },
       data: {
         ...(name && { name }),
-        ...(description && { description }),
+        ...(sku !== undefined && { sku }),
+        ...(description !== undefined && { description }),
         ...(price && { price: parseFloat(price) }),
         ...(currency && { currency }),
         ...(stock !== undefined && { stock: parseInt(stock) }),
@@ -1265,15 +1294,24 @@ app.put("/api/products/:id", async (req, res) => {
         ...(depth_mm !== undefined && {
           depth_mm: depth_mm ? parseInt(depth_mm) : null,
         }),
-        ...(material && { material }),
-        ...(colorOptions && { colorOptions }),
+        ...(material !== undefined && { material }),
+        ...(colorOptions !== undefined && { colorOptions }),
+        ...(color_options !== undefined && { color_options }),
+        ...(size_options !== undefined && { size_options }),
+        ...(material_options !== undefined && { material_options }),
+        ...(side_options !== undefined && { side_options }),
+        ...(finishing_options !== undefined && { finishing_options }),
+        ...(processing_options !== undefined && { processing_options }),
+        ...(delivery_options !== undefined && { delivery_options }),
+        ...(quantity_options !== undefined && { quantity_options }),
+        ...(shipping_options !== undefined && { shipping_options }),
         ...(print_type && { print_type }),
         ...(turnaround_hours !== undefined && {
           turnaround_hours: turnaround_hours
             ? parseInt(turnaround_hours)
             : null,
         }),
-        ...(images && { images }),
+        ...(images !== undefined && { images }),
         ...(active !== undefined && { active }),
       },
     });
@@ -1286,6 +1324,87 @@ app.put("/api/products/:id", async (req, res) => {
     }
     res.status(500).json({ message: "Failed to update product" });
   }
+});
+
+// UPLOAD product image
+const PRODUCT_MAX_UPLOAD_SIZE = 3 * 1024 * 1024; // 3 MB
+const productUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: PRODUCT_MAX_UPLOAD_SIZE },
+  fileFilter: (_req, file, cb) => {
+    const allowed = new Set([
+      "image/jpeg",
+      "image/png",
+      "image/webp",
+      "image/gif",
+    ]);
+    if (allowed.has(file.mimetype)) cb(null, true);
+    else cb(new Error("Only JPEG, PNG, WebP, and GIF images are allowed"));
+  },
+});
+
+app.post(
+  "/api/products/upload",
+  productUpload.single("file"),
+  async (req, res) => {
+    if (!req.file) return res.status(400).json({ message: "No file provided" });
+
+    try {
+      const { data: existing } =
+        await supabase.storage.getBucket("printhub_s3");
+      if (!existing) {
+        const { error: bucketErr } = await supabase.storage.createBucket(
+          "printhub_s3",
+          {
+            public: true,
+            fileSizeLimit: PRODUCT_MAX_UPLOAD_SIZE,
+          },
+        );
+        if (bucketErr)
+          throw new Error(`Cannot create storage bucket: ${bucketErr.message}`);
+      }
+
+      const ext = req.file.mimetype.split("/")[1] || "jpg";
+      const path = `products/${Date.now()}.${ext}`;
+
+      const { error } = await supabase.storage
+        .from("printhub_s3")
+        .upload(path, req.file.buffer, {
+          contentType: req.file.mimetype,
+          upsert: false,
+        });
+
+      if (error) throw new Error(`Storage upload failed: ${error.message}`);
+
+      const { data: urlData } = supabase.storage
+        .from("printhub_s3")
+        .getPublicUrl(path);
+
+      return res.status(201).json({
+        url: urlData.publicUrl,
+        path,
+        size: req.file.size,
+        mimeType: req.file.mimetype,
+      });
+    } catch (e) {
+      console.error("Product upload error:", e.message);
+      return res.status(500).json({ message: e.message || "Upload failed" });
+    }
+  },
+);
+
+// Multer error handler for product upload
+app.use((err, req, res, next) => {
+  if (
+    err instanceof multer.MulterError &&
+    req.path === "/api/products/upload"
+  ) {
+    return res.status(400).json({ message: err.message });
+  }
+  if (err && req.path === "/api/products/upload") {
+    return res.status(400).json({ message: err.message });
+  }
+  next(err);
 });
 
 // DELETE product (soft delete via deleted_at field)
@@ -1512,7 +1631,12 @@ app.delete("/api/orders/:orderId/items/:itemId", async (req, res) => {
 // =================================================
 const BUILDER_BUCKET = "printhub_s3";
 const MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10 MB
-const ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const ALLOWED_MIME = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+]);
 const GENERATION_COOLDOWN_MS = 30_000; // 30 s per user
 const generationCooldown = {}; // userId -> lastGeneratedAt (ms)
 
@@ -1537,13 +1661,15 @@ async function ensureBucket() {
       public: true,
       fileSizeLimit: MAX_UPLOAD_SIZE,
     });
-    if (error) throw new Error(`Cannot create storage bucket: ${error.message}`);
+    if (error)
+      throw new Error(`Cannot create storage bucket: ${error.message}`);
   } else if (!existing.public) {
     // Bucket exists but is private — make it public
     const { error } = await supabase.storage.updateBucket(BUILDER_BUCKET, {
       public: true,
     });
-    if (error) throw new Error(`Cannot update bucket visibility: ${error.message}`);
+    if (error)
+      throw new Error(`Cannot update bucket visibility: ${error.message}`);
   }
 }
 
@@ -1556,52 +1682,52 @@ function getUserId(req) {
 }
 
 // POST /api/builder/upload — upload a source asset to Supabase storage
-app.post(
-  "/api/builder/upload",
-  upload.single("file"),
-  async (req, res) => {
-    const userId = getUserId(req);
-    if (!userId)
-      return res.status(401).json({ message: "Authentication required: send X-User-Id header" });
+app.post("/api/builder/upload", upload.single("file"), async (req, res) => {
+  const userId = getUserId(req);
+  if (!userId)
+    return res
+      .status(401)
+      .json({ message: "Authentication required: send X-User-Id header" });
 
-    if (!req.file)
-      return res.status(400).json({ message: "No file provided" });
+  if (!req.file) return res.status(400).json({ message: "No file provided" });
 
-    try {
-      await ensureBucket();
+  try {
+    await ensureBucket();
 
-      const ext = req.file.mimetype.split("/")[1] || "jpg";
-      const path = `uploads/${userId}/${Date.now()}.${ext}`;
+    const ext = req.file.mimetype.split("/")[1] || "jpg";
+    const path = `uploads/${userId}/${Date.now()}.${ext}`;
 
-      const { error } = await supabase.storage
-        .from(BUILDER_BUCKET)
-        .upload(path, req.file.buffer, {
-          contentType: req.file.mimetype,
-          upsert: false,
-        });
-
-      if (error) throw new Error(`Storage upload failed: ${error.message}`);
-
-      const { data: urlData } = supabase.storage
-        .from(BUILDER_BUCKET)
-        .getPublicUrl(path);
-
-      return res.status(201).json({
-        url: urlData.publicUrl,
-        path,
-        size: req.file.size,
-        mimeType: req.file.mimetype,
+    const { error } = await supabase.storage
+      .from(BUILDER_BUCKET)
+      .upload(path, req.file.buffer, {
+        contentType: req.file.mimetype,
+        upsert: false,
       });
-    } catch (e) {
-      console.error("Builder upload error:", e.message);
-      return res.status(500).json({ message: e.message || "Upload failed" });
-    }
+
+    if (error) throw new Error(`Storage upload failed: ${error.message}`);
+
+    const { data: urlData } = supabase.storage
+      .from(BUILDER_BUCKET)
+      .getPublicUrl(path);
+
+    return res.status(201).json({
+      url: urlData.publicUrl,
+      path,
+      size: req.file.size,
+      mimeType: req.file.mimetype,
+    });
+  } catch (e) {
+    console.error("Builder upload error:", e.message);
+    return res.status(500).json({ message: e.message || "Upload failed" });
   }
-);
+});
 
 // Multer error handler for builder upload
 app.use((err, req, res, next) => {
-  if (err instanceof multer.MulterError || (err && ALLOWED_MIME !== undefined && req.path === "/api/builder/upload")) {
+  if (
+    err instanceof multer.MulterError ||
+    (err && ALLOWED_MIME !== undefined && req.path === "/api/builder/upload")
+  ) {
     return res.status(400).json({ message: err.message });
   }
   next(err);
@@ -1611,14 +1737,18 @@ app.use((err, req, res, next) => {
 app.post("/api/builder/generate", async (req, res) => {
   const userId = getUserId(req);
   if (!userId)
-    return res.status(401).json({ message: "Authentication required: send X-User-Id header" });
+    return res
+      .status(401)
+      .json({ message: "Authentication required: send X-User-Id header" });
 
   const { prompt, model, imageSize } = req.body;
   if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0)
     return res.status(400).json({ message: "prompt is required" });
 
   if (prompt.trim().length > 1000)
-    return res.status(400).json({ message: "prompt must be 1000 characters or fewer" });
+    return res
+      .status(400)
+      .json({ message: "prompt must be 1000 characters or fewer" });
 
   // Per-user cooldown
   const now = Date.now();
@@ -1634,7 +1764,9 @@ app.post("/api/builder/generate", async (req, res) => {
   generationCooldown[userId] = now;
 
   try {
-    console.log(`🎨 Builder generate: userId=${userId}, prompt="${prompt.slice(0, 80)}..."`);
+    console.log(
+      `🎨 Builder generate: userId=${userId}, prompt="${prompt.slice(0, 80)}..."`,
+    );
 
     const result = await generateImage({
       prompt: prompt.trim(),
@@ -1647,20 +1779,28 @@ app.post("/api/builder/generate", async (req, res) => {
     // Returning a Supabase URL to the browser avoids the blank-placeholder race condition.
     await ensureBucket();
 
-    const sourceLabel = process.env.FAL_MOCK === "true" ? "Pollinations" : "fal.ai";
+    const sourceLabel =
+      process.env.FAL_MOCK === "true" ? "Pollinations" : "fal.ai";
     console.log(`⬇️  Fetching generated image from ${sourceLabel}…`);
     const imgRes = await fetch(result.url);
-    if (!imgRes.ok) throw new Error(`Failed to fetch generated image from ${sourceLabel}`);
+    if (!imgRes.ok)
+      throw new Error(`Failed to fetch generated image from ${sourceLabel}`);
     const imgBuffer = Buffer.from(await imgRes.arrayBuffer());
 
     const storagePath = `generated/${userId}/${Date.now()}.jpg`;
     const { error: storageErr } = await supabase.storage
       .from(BUILDER_BUCKET)
-      .upload(storagePath, imgBuffer, { contentType: "image/jpeg", upsert: false });
+      .upload(storagePath, imgBuffer, {
+        contentType: "image/jpeg",
+        upsert: false,
+      });
 
     if (storageErr) {
       // Non-fatal: return the source URL directly if Supabase storage fails
-      console.warn("Storage persist failed, returning source URL:", storageErr.message);
+      console.warn(
+        "Storage persist failed, returning source URL:",
+        storageErr.message,
+      );
       return res.json({
         url: result.url,
         width: result.width,
