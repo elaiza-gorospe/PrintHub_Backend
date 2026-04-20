@@ -1832,6 +1832,285 @@ app.post("/api/builder/generate", async (req, res) => {
   }
 });
 
+// =================================================
+// PAYMONGO PAYMENT API
+// =================================================
+
+const PAYMONGO_BASE = "https://api.paymongo.com/v1";
+
+function paymongoAuth() {
+  return Buffer.from(process.env.PAYMONGO_SECRET_KEY + ":").toString("base64");
+}
+
+// POST /api/payments/checkout — create a PayMongo Checkout Session for an order
+app.post("/api/payments/checkout", async (req, res) => {
+  const { orderId } = req.body;
+  if (!orderId) return res.status(400).json({ message: "orderId is required" });
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(orderId) },
+      include: { items: { include: { product: true } } },
+    });
+
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    if (order.payment_status === "paid")
+      return res.status(400).json({ message: "Order already paid" });
+
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3001";
+
+    // Build line items from order items
+    const lineItems = order.items.map((item) => ({
+      currency: "PHP",
+      amount: Math.round(parseFloat(item.unit_price) * 100), // in centavos
+      name: item.product?.name || `Item #${item.productId}`,
+      quantity: item.quantity,
+    }));
+
+    // If there is a shipping cost embedded in the total vs sum of items, add as a line item
+    const itemsTotal = order.items.reduce(
+      (sum, item) => sum + parseFloat(item.total_price),
+      0,
+    );
+    const shippingCost = parseFloat(order.total) - itemsTotal;
+    if (shippingCost > 0.005) {
+      lineItems.push({
+        currency: "PHP",
+        amount: Math.round(shippingCost * 100),
+        name: "Shipping",
+        quantity: 1,
+      });
+    }
+
+    const totalAmountCentavos = Math.round(parseFloat(order.total) * 100);
+
+    const sessionPayload = {
+      data: {
+        attributes: {
+          line_items: lineItems,
+          payment_method_types: ["card", "gcash", "paymaya"],
+          success_url: `${frontendUrl}/payment/return?orderId=${order.id}&status=success`,
+          cancel_url: `${frontendUrl}/payment/return?orderId=${order.id}&status=cancelled`,
+          description: `PrintHub Order #${order.id}`,
+          reference_number: String(order.id),
+          metadata: { order_id: String(order.id) },
+          billing: order.billing_address
+            ? {
+                name: `Order #${order.id}`,
+                address: { line1: order.billing_address, country: "PH" },
+              }
+            : undefined,
+        },
+      },
+    };
+
+    const pmRes = await fetch(`${PAYMONGO_BASE}/checkout_sessions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${paymongoAuth()}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(sessionPayload),
+    });
+
+    const pmData = await pmRes.json();
+
+    if (!pmRes.ok) {
+      console.error("PayMongo error:", pmData);
+      return res.status(502).json({
+        message: "Failed to create payment session",
+        details: pmData?.errors || pmData,
+      });
+    }
+
+    const sessionId = pmData.data.id;
+    const checkoutUrl = pmData.data.attributes.checkout_url;
+
+    // Save session info on the order
+    await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        paymongo_session_id: sessionId,
+        checkout_url: checkoutUrl,
+        payment_status: "awaiting_payment",
+      },
+    });
+
+    res.json({ checkout_url: checkoutUrl, session_id: sessionId });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+// GET /api/payments/:orderId/status — poll payment status (fallback for missed webhooks)
+app.get("/api/payments/:orderId/status", async (req, res) => {
+  const orderId = parseInt(req.params.orderId);
+  if (isNaN(orderId))
+    return res.status(400).json({ message: "Invalid orderId" });
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      select: {
+        id: true,
+        payment_status: true,
+        payment_method: true,
+        payment_reference: true,
+        paymongo_session_id: true,
+        status: true,
+        total: true,
+      },
+    });
+
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    // If already marked paid in DB, return without calling PayMongo
+    if (order.payment_status === "paid") {
+      return res.json({ payment_status: "paid", order });
+    }
+
+    // If we have a session ID, check PayMongo for the latest status
+    if (order.paymongo_session_id) {
+      const pmRes = await fetch(
+        `${PAYMONGO_BASE}/checkout_sessions/${order.paymongo_session_id}`,
+        {
+          headers: {
+            Authorization: `Basic ${paymongoAuth()}`,
+            Accept: "application/json",
+          },
+        },
+      );
+
+      if (pmRes.ok) {
+        const pmData = await pmRes.json();
+        const attrs = pmData.data.attributes;
+        const pmStatus = attrs.payment_intent?.attributes?.status;
+        const pmPaymentMethod = attrs.payment_method_used || null;
+
+        if (pmStatus === "succeeded" || attrs.status === "active") {
+          // Retrieve payment reference from linked payments if available
+          const payments = attrs.payments || [];
+          const reference =
+            payments.length > 0 ? payments[0].id : order.paymongo_session_id;
+
+          await prisma.order.update({
+            where: { id: orderId },
+            data: {
+              payment_status: "paid",
+              status: "confirmed",
+              payment_method: pmPaymentMethod,
+              payment_reference: reference,
+            },
+          });
+
+          return res.json({
+            payment_status: "paid",
+            order: { ...order, payment_status: "paid" },
+          });
+        }
+      }
+    }
+
+    res.json({ payment_status: order.payment_status, order });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+// POST /api/payments/webhook — PayMongo webhook handler
+// Register this URL in app.paymongo.com → Developers → Webhooks
+app.post(
+  "/api/payments/webhook",
+  express.raw({ type: "application/json" }),
+  async (req, res) => {
+    // Acknowledge quickly to avoid PayMongo retrying
+    res.sendStatus(200);
+
+    try {
+      const webhookSecret = process.env.PAYMONGO_WEBHOOK_SECRET;
+
+      // Verify signature if secret is configured
+      if (
+        webhookSecret &&
+        webhookSecret !== "whsec_REPLACE_WITH_YOUR_WEBHOOK_SECRET"
+      ) {
+        const sigHeader = req.headers["paymongo-signature"];
+        if (!sigHeader) {
+          console.warn("PayMongo webhook: missing signature header — skipping");
+          return;
+        }
+
+        // Signature format: t=<timestamp>,te=<test_sig>,li=<live_sig>
+        const parts = sigHeader.split(",").reduce((acc, part) => {
+          const [k, v] = part.split("=");
+          acc[k] = v;
+          return acc;
+        }, {});
+
+        const timestamp = parts.t;
+        const toSign = `${timestamp}.${req.body.toString()}`;
+        const crypto = require("crypto");
+        const expectedSig = crypto
+          .createHmac("sha256", webhookSecret)
+          .update(toSign)
+          .digest("hex");
+
+        const receivedSig = parts.te || parts.li; // test env uses 'te'
+        if (receivedSig !== expectedSig) {
+          console.warn("PayMongo webhook: signature mismatch — ignoring");
+          return;
+        }
+      }
+
+      const payload = JSON.parse(req.body.toString());
+      const eventType = payload?.data?.attributes?.type;
+      const eventData = payload?.data?.attributes?.data;
+
+      console.log(`PayMongo webhook received: ${eventType}`);
+
+      if (
+        eventType === "checkout_session.payment.paid" ||
+        eventType === "payment.paid"
+      ) {
+        const attrs = eventData?.attributes || {};
+        const metadata =
+          attrs.metadata || eventData?.attributes?.metadata || {};
+        const orderId =
+          parseInt(metadata.order_id) ||
+          parseInt(eventData?.attributes?.reference_number);
+
+        if (!orderId) {
+          console.warn(
+            "PayMongo webhook: could not determine orderId from event",
+          );
+          return;
+        }
+
+        const paymentMethod =
+          attrs.payment_method_type || attrs.source?.type || null;
+        const paymentReference = eventData?.id || null;
+
+        await prisma.order.update({
+          where: { id: orderId },
+          data: {
+            payment_status: "paid",
+            status: "confirmed",
+            payment_method: paymentMethod,
+            payment_reference: paymentReference,
+          },
+        });
+
+        console.log(`✅ Order #${orderId} marked as paid via PayMongo`);
+      }
+    } catch (e) {
+      console.error("PayMongo webhook processing error:", e);
+    }
+  },
+);
+
 // Start server with migrations
 (async () => {
   try {

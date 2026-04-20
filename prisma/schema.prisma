@@ -90,13 +90,17 @@ model Order {
   status          String      @default("pending")
   shipping_address String?
   billing_address String?
-  proofApproved   Boolean     @default(false)
-  payment_status  String      @default("unpaid")
-  due_date        DateTime?
-  delivered_at    DateTime?
-  createdAt       DateTime    @default(now()) @map("created_at")
-  updatedAt       DateTime    @updatedAt @map("updated_at")
-  deleted_at      DateTime?   @map("deleted_at")
+  proofApproved        Boolean     @default(false)
+  payment_status       String      @default("unpaid")
+  payment_method       String?
+  payment_reference    String?
+  paymongo_session_id  String?
+  checkout_url         String?
+  due_date             DateTime?
+  delivered_at         DateTime?
+  createdAt            DateTime    @default(now()) @map("created_at")
+  updatedAt            DateTime    @updatedAt @map("updated_at")
+  deleted_at           DateTime?   @map("deleted_at")
 
   items           OrderItem[]
 }
