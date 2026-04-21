@@ -1200,6 +1200,7 @@ app.post("/api/products", async (req, res) => {
       shipping_options,
       print_type,
       turnaround_hours,
+      ai_prompt_rules,
       images,
     } = req.body;
 
@@ -1231,6 +1232,7 @@ app.post("/api/products", async (req, res) => {
         shipping_options: shipping_options || [],
         print_type,
         turnaround_hours: turnaround_hours ? parseInt(turnaround_hours) : null,
+        ai_prompt_rules: ai_prompt_rules || null,
         images: images || [],
         active: true,
       },
@@ -1271,6 +1273,7 @@ app.put("/api/products/:id", async (req, res) => {
       shipping_options,
       print_type,
       turnaround_hours,
+      ai_prompt_rules,
       images,
       active,
       sku,
@@ -1312,6 +1315,7 @@ app.put("/api/products/:id", async (req, res) => {
             : null,
         }),
         ...(images !== undefined && { images }),
+        ...(ai_prompt_rules !== undefined && { ai_prompt_rules }),
         ...(active !== undefined && { active }),
       },
     });

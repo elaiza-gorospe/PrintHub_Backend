@@ -72,6 +72,7 @@ model Product {
   shipping_options   String[]  @default([])
   print_type   String?   // e.g. digital, offset, screen
   turnaround_hours Int?
+  ai_prompt_rules String?  // strict AI generation/design rules for this product category
   images       String[]  @default([])
   active       Boolean   @default(true)
   createdAt    DateTime  @default(now()) @map("created_at")
