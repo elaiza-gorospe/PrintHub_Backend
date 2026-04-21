@@ -1848,7 +1848,7 @@ function paymongoAuth() {
 
 // POST /api/payments/checkout — create a PayMongo Checkout Session for an order
 app.post("/api/payments/checkout", async (req, res) => {
-  const { orderId } = req.body;
+  const { orderId, returnBase } = req.body;
   if (!orderId) return res.status(400).json({ message: "orderId is required" });
 
   try {
@@ -1861,7 +1861,8 @@ app.post("/api/payments/checkout", async (req, res) => {
     if (order.payment_status === "paid")
       return res.status(400).json({ message: "Order already paid" });
 
-    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3001";
+    const frontendUrl =
+      returnBase || process.env.FRONTEND_URL || "http://localhost:3001";
 
     // Build line items from order items
     const lineItems = order.items.map((item) => ({
