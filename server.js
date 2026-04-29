@@ -1698,8 +1698,17 @@ app.post("/api/builder/upload", upload.single("file"), async (req, res) => {
   try {
     await ensureBucket();
 
+    const { description } = req.body;
     const ext = req.file.mimetype.split("/")[1] || "jpg";
     const path = `uploads/${userId}/${Date.now()}.${ext}`;
+
+    if (description) {
+      console.log(
+        `📤 Builder upload: userId=${userId}, description="${description.slice(0, 80)}..."`,
+      );
+    } else {
+      console.log(`📤 Builder upload: userId=${userId}`);
+    }
 
     const { error } = await supabase.storage
       .from(BUILDER_BUCKET)
@@ -1745,14 +1754,14 @@ app.post("/api/builder/generate", async (req, res) => {
       .status(401)
       .json({ message: "Authentication required: send X-User-Id header" });
 
-  const { prompt, model, imageSize } = req.body;
+  const { prompt, model, imageSize, productId } = req.body;
   if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0)
     return res.status(400).json({ message: "prompt is required" });
 
-  if (prompt.trim().length > 1000)
+  if (prompt.trim().length > 2000)
     return res
       .status(400)
-      .json({ message: "prompt must be 1000 characters or fewer" });
+      .json({ message: "prompt must be 2000 characters or fewer" });
 
   // Per-user cooldown
   const now = Date.now();
@@ -1769,7 +1778,7 @@ app.post("/api/builder/generate", async (req, res) => {
 
   try {
     console.log(
-      `🎨 Builder generate: userId=${userId}, prompt="${prompt.slice(0, 80)}..."`,
+      `🎨 Builder generate: userId=${userId}, productId=${productId || "N/A"}, prompt="${prompt.slice(0, 80)}..."`,
     );
 
     const result = await generateImage({
