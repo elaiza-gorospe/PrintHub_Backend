@@ -1993,10 +1993,14 @@ app.get("/api/payments/:orderId/status", async (req, res) => {
         const attrs = pmData.data.attributes;
         const pmStatus = attrs.payment_intent?.attributes?.status;
         const pmPaymentMethod = attrs.payment_method_used || null;
+        const payments = Array.isArray(attrs.payments) ? attrs.payments : [];
+        const hasPaidPayment = payments.some((payment) => {
+          const paymentStatus = payment?.attributes?.status;
+          return paymentStatus === "paid" || paymentStatus === "succeeded";
+        });
 
-        if (pmStatus === "succeeded" || attrs.status === "active") {
+        if (pmStatus === "succeeded" || hasPaidPayment) {
           // Retrieve payment reference from linked payments if available
-          const payments = attrs.payments || [];
           const reference =
             payments.length > 0 ? payments[0].id : order.paymongo_session_id;
 
