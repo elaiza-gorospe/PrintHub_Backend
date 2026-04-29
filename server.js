@@ -1754,7 +1754,7 @@ app.post("/api/builder/generate", async (req, res) => {
       .status(401)
       .json({ message: "Authentication required: send X-User-Id header" });
 
-  const { prompt, model, imageSize, productId } = req.body;
+  const { prompt, model, imageSize, productId, sourceImageUrl } = req.body;
   if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0)
     return res.status(400).json({ message: "prompt is required" });
 
@@ -1778,7 +1778,7 @@ app.post("/api/builder/generate", async (req, res) => {
 
   try {
     console.log(
-      `🎨 Builder generate: userId=${userId}, productId=${productId || "N/A"}, prompt="${prompt.slice(0, 80)}..."`,
+      `🎨 Builder generate: userId=${userId}, productId=${productId || "N/A"}, sourceImage=${sourceImageUrl ? "yes" : "no"}, prompt="${prompt.slice(0, 80)}..."`,
     );
 
     const result = await generateImage({
