@@ -457,6 +457,105 @@ const PRODUCT_SEEDS = [
   },
 ];
 
+// ─── Category Template seeds ──────────────────────────────────────────────────
+
+const CATEGORY_TEMPLATE_SEEDS = [
+  {
+    name: "T-Shirt",
+    category_type: "t-shirt",
+    description: "Custom-printed T-shirts with various size and color options.",
+    print_type: "screen-print",
+    turnaround_hours: 72,
+    color_options: [
+      "Full Color (CMYK) - Direct-to-Garment",
+      "Full Color (Plastisol) - Screen Print",
+      "Single Color - Screen Print",
+      "Multi-Color - Screen Print",
+    ],
+    size_options: ["XS", "S", "M", "L", "XL", "2XL", "3XL", "4XL"],
+    material_options: [
+      "100% Cotton - 150gsm",
+      "100% Cotton - 180gsm",
+      "Cotton/Poly Blend - 160gsm",
+      "100% Polyester - 140gsm",
+      "Organic Cotton - 150gsm",
+    ],
+    side_options: [
+      "Front Chest",
+      "Back",
+      "Front & Back",
+      "Sleeve",
+      "Full Body Wrap",
+    ],
+    finishing_options: [
+      "None",
+      "Heat Transfer",
+      "Embroidery",
+      "Puff Print",
+      "Foil",
+      "Rhinestone",
+      "Glow-in-the-Dark",
+      "Metallic Print",
+    ],
+    processing_options: [
+      "Standard (5-7 days)",
+      "Rush (3-4 days)",
+      "Express (1-2 days)",
+    ],
+    delivery_options: [
+      "Pick Up",
+      "Metro Manila Delivery",
+      "Provincial Delivery",
+      "Same Day (Metro Manila)",
+    ],
+    quantity_options: [
+      "5 pcs|₱500.00",
+      "10 pcs|₱450.00",
+      "25 pcs|₱420.00",
+      "50 pcs|₱400.00",
+      "100 pcs|₱380.00",
+      "250 pcs|₱350.00",
+      "500 pcs|₱320.00",
+    ],
+    shipping_options: [
+      "Pick Up|Free",
+      "Metro Delivery|₱150.00",
+      "Provincial|₱300.00",
+    ],
+    ai_prompt_rules:
+      "Generate a vibrant T-shirt design optimized for screen printing or DTG. For screen print: limit to 4-6 colors for cost efficiency. Design must work on the specified print area (chest, back, sleeve, or full). Include color specifications in CMYK or PMS if multi-color. Avoid small fine details that won't transfer well. Design should scale well across all sizes. Safe margin: 0.25in from print edges. For DTG: can use full color spectrum without limitations. Include a mockup guide indicating where the design sits on the garment. Resolution: 300dpi minimum.",
+  },
+];
+
+async function seedCategoryTemplates() {
+  console.log("\nSeeding category templates...");
+  for (const ct of CATEGORY_TEMPLATE_SEEDS) {
+    await prisma.categoryTemplate.upsert({
+      where: { category_type: ct.category_type },
+      update: {},
+      create: {
+        name: ct.name,
+        category_type: ct.category_type,
+        description: ct.description,
+        print_type: ct.print_type || null,
+        turnaround_hours: ct.turnaround_hours || null,
+        ai_prompt_rules: ct.ai_prompt_rules || null,
+        color_options: ct.color_options || [],
+        size_options: ct.size_options || [],
+        material_options: ct.material_options || [],
+        side_options: ct.side_options || [],
+        finishing_options: ct.finishing_options || [],
+        processing_options: ct.processing_options || [],
+        delivery_options: ct.delivery_options || [],
+        quantity_options: ct.quantity_options || [],
+        shipping_options: ct.shipping_options || [],
+      },
+    });
+    console.log(`  ✅ ${ct.name} (${ct.category_type})`);
+  }
+  console.log("✅ Category templates seeded");
+}
+
 async function seedProducts() {
   console.log("\nSeeding products...");
   for (const p of PRODUCT_SEEDS) {
@@ -563,6 +662,7 @@ main()
   })
   .finally(async () => {
     try {
+      await seedCategoryTemplates();
       await seedProducts();
       await seedSampleOrder();
     } catch (e) {
