@@ -756,7 +756,7 @@ app.post("/api/orders", async (req, res) => {
     return res.status(400).json({ message: "Invalid order payload" });
 
   try {
-    // Verify products exist
+    // Verify products exist and have sufficient stock
     const productIds = items.map((i) => i.productId);
     const products = await prisma.product.findMany({
       where: { id: { in: productIds } },
@@ -766,6 +766,22 @@ app.post("/api/orders", async (req, res) => {
       return res
         .status(400)
         .json({ message: "One or more products not found" });
+    }
+
+    // Check stock availability for all items
+    const productMap = new Map(products.map((p) => [p.id, p]));
+    for (const item of items) {
+      const product = productMap.get(item.productId);
+      const quantity = Number(item.quantity || 1);
+      if (product.stock < quantity) {
+        return res.status(400).json({
+          message: `Insufficient stock for ${product.name}. Available: ${product.stock}, Requested: ${quantity}`,
+          productId: item.productId,
+          productName: product.name,
+          available: product.stock,
+          requested: quantity,
+        });
+      }
     }
 
     let itemsTotal = 0;
@@ -795,17 +811,32 @@ app.post("/api/orders", async (req, res) => {
       `💰 Calculation: itemsTotal=${itemsTotal}, shipping=${shipping}, total=${total}`,
     );
 
-    const order = await prisma.order.create({
-      data: {
-        userId,
-        total: parseFloat(total.toFixed(2)),
-        currency: "PHP",
-        status: "pending",
-        shipping_address,
-        billing_address,
-        items: { create: createItems },
-      },
-      include: { items: true },
+    // Create order and deduct stock in transaction
+    const order = await prisma.$transaction(async (tx) => {
+      // Create the order
+      const newOrder = await tx.order.create({
+        data: {
+          userId,
+          total: parseFloat(total.toFixed(2)),
+          currency: "PHP",
+          status: "pending",
+          shipping_address,
+          billing_address,
+          items: { create: createItems },
+        },
+        include: { items: true },
+      });
+
+      // Deduct stock for each item
+      for (const item of items) {
+        const quantity = Number(item.quantity || 1);
+        await tx.product.update({
+          where: { id: item.productId },
+          data: { stock: { decrement: quantity } },
+        });
+      }
+
+      return newOrder;
     });
 
     console.log(`✅ Order created: ID=${order.id}, total=${order.total}`);
@@ -1470,76 +1501,6 @@ app.delete("/api/products/:id", async (req, res) => {
 // ORDERS API
 // =================================================
 
-// CREATE new order with items
-app.post("/api/orders", async (req, res) => {
-  try {
-    const { userId, items, shipping_address, billing_address } = req.body;
-
-    if (!userId || !items || items.length === 0) {
-      return res.status(400).json({ message: "userId and items are required" });
-    }
-
-    // Verify user exists
-    const user = await prisma.user.findUnique({
-      where: { id: parseInt(userId) },
-    });
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    // Calculate total and create order with items
-    let total = 0;
-    const orderItems = [];
-
-    for (const item of items) {
-      const product = await prisma.product.findUnique({
-        where: { id: parseInt(item.productId) },
-      });
-
-      if (!product) {
-        return res
-          .status(404)
-          .json({ message: `Product ${item.productId} not found` });
-      }
-
-      const unitPrice = parseFloat(product.price);
-      const quantity = parseInt(item.quantity) || 1;
-      const itemTotal = unitPrice * quantity;
-
-      total += itemTotal;
-
-      orderItems.push({
-        productId: parseInt(item.productId),
-        quantity,
-        unit_price: unitPrice,
-        total_price: itemTotal,
-        customizations: item.customizations || null,
-      });
-    }
-
-    // Create order with items in transaction
-    const order = await prisma.order.create({
-      data: {
-        userId: parseInt(userId),
-        total: parseFloat(total.toFixed(2)),
-        currency: "PHP",
-        status: "pending",
-        shipping_address,
-        billing_address,
-        items: {
-          create: orderItems,
-        },
-      },
-      include: { items: true, user: true },
-    });
-
-    res.status(201).json({ message: "Order created", order });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ message: "Failed to create order" });
-  }
-});
-
 // GET order by ID
 app.get("/api/orders/:id", async (req, res) => {
   try {
@@ -1619,16 +1580,41 @@ app.patch("/api/orders/:id/deliver", async (req, res) => {
   }
 });
 
-// DELETE order (soft delete)
+// DELETE order (soft delete) - restore stock
 app.delete("/api/orders/:id", async (req, res) => {
   try {
-    const order = await prisma.order.update({
-      where: { id: parseInt(req.params.id) },
-      data: { deleted_at: new Date() },
-      include: { items: true, user: true },
+    const orderId = parseInt(req.params.id);
+
+    // Fetch order with items before deletion
+    const orderToDelete = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: { items: true },
     });
 
-    res.json({ message: "Order deleted", order });
+    if (!orderToDelete) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    // Restore stock and delete order in transaction
+    const order = await prisma.$transaction(async (tx) => {
+      // Restore stock for all items
+      for (const item of orderToDelete.items) {
+        await tx.product.update({
+          where: { id: item.productId },
+          data: { stock: { increment: item.quantity } },
+        });
+      }
+
+      // Soft delete the order
+      return await tx.order.update({
+        where: { id: orderId },
+        data: { deleted_at: new Date() },
+        include: { items: true, user: true },
+      });
+    });
+
+    console.log(`✅ Order ${orderId} deleted and stock restored`);
+    res.json({ message: "Order deleted and stock restored", order });
   } catch (e) {
     console.error(e);
     if (e.code === "P2025") {
@@ -1638,29 +1624,51 @@ app.delete("/api/orders/:id", async (req, res) => {
   }
 });
 
-// DELETE order item
+// DELETE order item - restore stock for that product
 app.delete("/api/orders/:orderId/items/:itemId", async (req, res) => {
   try {
     const orderId = parseInt(req.params.orderId);
     const itemId = parseInt(req.params.itemId);
 
-    // Delete the item
-    await prisma.orderItem.delete({ where: { id: itemId } });
-
-    // Recalculate order total
-    const items = await prisma.orderItem.findMany({ where: { orderId } });
-    const newTotal = items.reduce(
-      (sum, item) => sum + parseFloat(item.total_price),
-      0,
-    );
-
-    const updatedOrder = await prisma.order.update({
-      where: { id: orderId },
-      data: { total: newTotal },
-      include: { items: true, user: true },
+    // Fetch item before deletion
+    const itemToDelete = await prisma.orderItem.findUnique({
+      where: { id: itemId },
     });
 
-    res.json({ message: "Item removed from order", order: updatedOrder });
+    if (!itemToDelete) {
+      return res.status(404).json({ message: "Order item not found" });
+    }
+
+    // Delete item and restore stock in transaction
+    const updatedOrder = await prisma.$transaction(async (tx) => {
+      // Restore stock
+      await tx.product.update({
+        where: { id: itemToDelete.productId },
+        data: { stock: { increment: itemToDelete.quantity } },
+      });
+
+      // Delete the item
+      await tx.orderItem.delete({ where: { id: itemId } });
+
+      // Recalculate order total
+      const items = await tx.orderItem.findMany({ where: { orderId } });
+      const newTotal = items.reduce(
+        (sum, item) => sum + parseFloat(item.total_price),
+        0,
+      );
+
+      return await tx.order.update({
+        where: { id: orderId },
+        data: { total: newTotal },
+        include: { items: true, user: true },
+      });
+    });
+
+    console.log(`✅ Item ${itemId} removed and stock restored`);
+    res.json({
+      message: "Item removed from order and stock restored",
+      order: updatedOrder,
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ message: "Failed to remove item" });
