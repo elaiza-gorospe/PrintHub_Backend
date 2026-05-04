@@ -517,6 +517,12 @@ app.put("/api/user-profile/:id", async (req, res) => {
         .status(400)
         .json({ message: "Only users born in 2011 or earlier allowed" });
   }
+  // normalize birthday: convert valid input to ISO string, otherwise set null
+  const birthdayValue = (() => {
+    if (!birthday || birthday === "") return null;
+    const d = new Date(birthday);
+    return isNaN(d.getTime()) ? null : d.toISOString();
+  })();
 
   // if email is provided, validate format
   if (email && !/\S+@\S+\.\S+/.test(String(email))) {
@@ -544,7 +550,7 @@ app.put("/api/user-profile/:id", async (req, res) => {
           first_name: first,
           last_name: last,
           email,
-          birthday,
+          birthday: birthdayValue,
           gender,
           phone,
           address,
@@ -564,7 +570,7 @@ app.put("/api/user-profile/:id", async (req, res) => {
       data: {
         first_name: first,
         last_name: last,
-        birthday,
+        birthday: birthdayValue,
         gender,
         phone,
         address,
