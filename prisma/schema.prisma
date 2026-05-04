@@ -145,24 +145,3 @@ model Inquiry {
   updatedAt     DateTime  @updatedAt @map("updated_at")
 }
 
-model CategoryTemplate {
-  id                    Int       @id @default(autoincrement())
-  name                  String    @unique
-  category_type         String    @unique @map("category_type")
-  description           String?
-  print_type            String?   @map("print_type")
-  turnaround_hours      Int?      @map("turnaround_hours")
-  color_options         String[]  @default([]) @map("color_options")
-  size_options          String[]  @default([]) @map("size_options")
-  material_options      String[]  @default([]) @map("material_options")
-  side_options          String[]  @default([]) @map("side_options")
-  finishing_options     String[]  @default([]) @map("finishing_options")
-  processing_options    String[]  @default([]) @map("processing_options")
-  delivery_options      String[]  @default([]) @map("delivery_options")
-  quantity_options      String[]  @default([]) @map("quantity_options")
-  shipping_options      String[]  @default([]) @map("shipping_options")
-  ai_prompt_rules       String?   @map("ai_prompt_rules")
-  createdAt             DateTime  @default(now()) @map("created_at")
-  updatedAt             DateTime  @updatedAt @map("updated_at")
-}
-

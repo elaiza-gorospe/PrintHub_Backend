@@ -1004,6 +1004,23 @@ app.put("/api/inquiries/:id", async (req, res) => {
         .filter(Boolean)
         .join(" | ");
 
+      // Find or create a generic "Custom Inquiry" product
+      let inquiryProduct = await prisma.product.findFirst({
+        where: { sku: "INQUIRY-CUSTOM" },
+      });
+      if (!inquiryProduct) {
+        inquiryProduct = await prisma.product.create({
+          data: {
+            name: "Custom Inquiry Order",
+            sku: "INQUIRY-CUSTOM",
+            description: "Generic product for custom inquiry orders",
+            price: "0.00",
+            stock: 999,
+            active: true,
+          },
+        });
+      }
+
       const order = await prisma.order.create({
         data: {
           userId: existing.userId || null,
@@ -1013,6 +1030,29 @@ app.put("/api/inquiries/:id", async (req, res) => {
           payment_status: "awaiting_payment",
           shipping_address: summary || "Custom inquiry order",
           billing_address: `Inquiry #${inquiryId} — ${existing.name} <${existing.email}>`,
+          items: {
+            create: {
+              productId: inquiryProduct.id,
+              quantity: parseInt(existing.quantity) || 1,
+              unit_price: newPrice,
+              total_price: newPrice * (parseInt(existing.quantity) || 1),
+              customizations: {
+                inquiry_id: existing.id,
+                product_title: existing.product_title,
+                subject: existing.subject,
+                customer_name: existing.name,
+                customer_email: existing.email,
+                size: existing.size,
+                color: existing.color,
+                material: existing.material,
+                finishing: existing.finishing,
+                printing: existing.printing,
+                processing: existing.processing,
+                delivery: existing.delivery,
+                other: existing.other,
+              },
+            },
+          },
         },
       });
       orderId = order.id;
