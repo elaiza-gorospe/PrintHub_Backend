@@ -1639,7 +1639,7 @@ const ALLOWED_MIME = new Set([
   "image/gif",
 ]);
 const GENERATION_COOLDOWN_MS = 30_000; // 30 s per user
-const generationCooldown = {}; // userId -> lastGeneratedAt (ms)
+const generationCooldown = {}; // ownerKey -> lastGeneratedAt (ms)
 
 // Multer: memory storage, size + type guard
 const upload = multer({
@@ -1804,10 +1804,12 @@ app.use((err, req, res, next) => {
 // POST /api/builder/generate — generate an image via fal.ai and store in Supabase
 app.post("/api/builder/generate", async (req, res) => {
   const userId = getUserId(req);
-  if (!userId)
-    return res
-      .status(401)
-      .json({ message: "Authentication required: send X-User-Id header" });
+  // allow guests: derive an ownerKey for cooldown/storage (prefer userId when present)
+  const rawOwner = userId
+    ? String(userId)
+    : req.headers["x-forwarded-for"] || req.ip || "guest";
+  // sanitize owner key for use in storage paths and map keys
+  const ownerKey = String(rawOwner).replace(/[^a-zA-Z0-9_-]/g, "_");
 
   const { prompt, model, imageSize, productId, sourceImageUrl } = req.body;
   if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0)
@@ -1820,7 +1822,7 @@ app.post("/api/builder/generate", async (req, res) => {
 
   // Per-user cooldown
   const now = Date.now();
-  const last = generationCooldown[userId] || 0;
+  const last = generationCooldown[ownerKey] || 0;
   const remaining = GENERATION_COOLDOWN_MS - (now - last);
   if (remaining > 0) {
     return res.status(429).json({
@@ -1829,11 +1831,11 @@ app.post("/api/builder/generate", async (req, res) => {
     });
   }
 
-  generationCooldown[userId] = now;
+  generationCooldown[ownerKey] = now;
 
   try {
     console.log(
-      `🎨 Builder generate: userId=${userId}, productId=${productId || "N/A"}, sourceImage=${sourceImageUrl ? "yes" : "no"}, prompt="${prompt.slice(0, 80)}..."`,
+      `🎨 Builder generate: owner=${ownerKey}${userId ? ` (userId=${userId})` : " (guest)"}, productId=${productId || "N/A"}, sourceImage=${sourceImageUrl ? "yes" : "no"}, prompt="${prompt.slice(0, 80)}..."`,
     );
 
     const result = await generateImage({
@@ -1855,7 +1857,7 @@ app.post("/api/builder/generate", async (req, res) => {
       throw new Error(`Failed to fetch generated image from ${sourceLabel}`);
     const imgBuffer = Buffer.from(await imgRes.arrayBuffer());
 
-    const storagePath = `generated/${userId}/${Date.now()}.jpg`;
+    const storagePath = `generated/${ownerKey}/${Date.now()}.jpg`;
     const { error: storageErr } = await supabase.storage
       .from(BUILDER_BUCKET)
       .upload(storagePath, imgBuffer, {
@@ -1894,7 +1896,7 @@ app.post("/api/builder/generate", async (req, res) => {
     });
   } catch (e) {
     // Reset cooldown on failure so user can retry
-    delete generationCooldown[userId];
+    delete generationCooldown[ownerKey];
     console.error("Builder generate error:", e.message);
     return res.status(500).json({ message: e.message || "Generation failed" });
   }
