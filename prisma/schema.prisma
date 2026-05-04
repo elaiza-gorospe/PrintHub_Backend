@@ -22,6 +22,7 @@ model User {
   join_date   DateTime? @map("join_date")
   gender      String?
   birthday    DateTime?
+  avatar_url  String?  @map("avatar_url")
   position    String?
   createdAt   DateTime  @default(now()) @map("created_at")
   updatedAt   DateTime  @updatedAt @map("updated_at")

@@ -491,6 +491,7 @@ app.get("/api/user-profile/:id", (req, res) => {
         phone: u.phone || "+63",
         address: u.address || "",
         gender: u.gender || "",
+        avatar_url: u.avatar_url || "",
         birthday: u.birthday
           ? new Date(u.birthday).toISOString().slice(0, 10)
           : "",
@@ -503,13 +504,18 @@ app.get("/api/user-profile/:id", (req, res) => {
 });
 
 app.put("/api/user-profile/:id", async (req, res) => {
-  const { name, email, birthday, gender, phone, address } = req.body;
+  const { name, email, birthday, gender, phone, address, avatar_url } =
+    req.body;
 
-  if (!/^\+639\d{9}$/.test(phone))
-    return res
-      .status(400)
-      .json({ message: "Phone must be +639 followed by 9 digits" });
+  // Validate phone only when provided
+  if (phone !== undefined && phone !== "") {
+    if (!/^\+639\d{9}$/.test(phone))
+      return res
+        .status(400)
+        .json({ message: "Phone must be +639 followed by 9 digits" });
+  }
 
+  // Validate birthday only when provided
   if (birthday) {
     const y = new Date(birthday).getFullYear();
     if (y > 2011)
@@ -517,65 +523,50 @@ app.put("/api/user-profile/:id", async (req, res) => {
         .status(400)
         .json({ message: "Only users born in 2011 or earlier allowed" });
   }
+
   // normalize birthday: convert valid input to ISO string, otherwise set null
   const birthdayValue = (() => {
-    if (!birthday || birthday === "") return null;
+    if (birthday === undefined || birthday === "") return undefined;
     const d = new Date(birthday);
     return isNaN(d.getTime()) ? null : d.toISOString();
   })();
 
   // if email is provided, validate format
-  if (email && !/\S+@\S+\.\S+/.test(String(email))) {
+  if (email !== undefined && email && !/\S+@\S+\.\S+/.test(String(email))) {
     return res
       .status(400)
       .json({ message: "Please enter a valid email address" });
   }
 
-  const parts = String(name || "").split(" ");
-  const first = parts[0] || "";
-  const last = parts.slice(1).join(" ") || "";
+  // Build update data object only with provided fields
+  const updateData = {};
+  if (name !== undefined) {
+    const parts = String(name || "").split(" ");
+    updateData.first_name = parts[0] || "";
+    updateData.last_name = parts.slice(1).join(" ") || "";
+  }
+  if (email !== undefined) updateData.email = email;
+  if (birthday !== undefined) updateData.birthday = birthdayValue;
+  if (gender !== undefined) updateData.gender = gender;
+  if (phone !== undefined) updateData.phone = phone;
+  if (address !== undefined) updateData.address = address;
+  if (avatar_url !== undefined) updateData.avatar_url = avatar_url;
 
-  // if email is provided, prevent duplicates (exclude same user id)
-  if (email) {
-    try {
+  try {
+    // If email is being updated, ensure no duplicate exists
+    if (email) {
       const dup = await prisma.user.findFirst({
         where: { email, id: { not: parseInt(req.params.id) } },
       });
       if (dup)
         return res.status(400).json({ message: "Email already registered" });
-
-      await prisma.user.update({
-        where: { id: parseInt(req.params.id) },
-        data: {
-          first_name: first,
-          last_name: last,
-          email,
-          birthday: birthdayValue,
-          gender,
-          phone,
-          address,
-        },
-      });
-      return res.json({ message: "Profile updated" });
-    } catch (e) {
-      console.error(e);
-      return res.status(500).json({ message: "Database error" });
     }
-  }
 
-  // if no email provided
-  try {
     await prisma.user.update({
       where: { id: parseInt(req.params.id) },
-      data: {
-        first_name: first,
-        last_name: last,
-        birthday: birthdayValue,
-        gender,
-        phone,
-        address,
-      },
+      data: updateData,
     });
+
     return res.json({ message: "Profile updated" });
   } catch (e) {
     console.error(e);
@@ -1741,11 +1732,69 @@ app.post("/api/builder/upload", upload.single("file"), async (req, res) => {
   }
 });
 
-// Multer error handler for builder upload
+// Avatar upload (2 MB)
+const AVATAR_MAX_UPLOAD_SIZE = 2 * 1024 * 1024; // 2 MB
+const avatarUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: AVATAR_MAX_UPLOAD_SIZE },
+  fileFilter: (_req, file, cb) => {
+    if (ALLOWED_MIME.has(file.mimetype)) cb(null, true);
+    else cb(new Error("Only JPEG, PNG, WebP, and GIF images are allowed"));
+  },
+});
+
+app.post(
+  "/api/user/avatar-upload",
+  avatarUpload.single("file"),
+  async (req, res) => {
+    const userId = getUserId(req);
+    if (!userId)
+      return res
+        .status(401)
+        .json({ message: "Authentication required: send X-User-Id header" });
+
+    if (!req.file) return res.status(400).json({ message: "No file provided" });
+
+    try {
+      await ensureBucket();
+
+      const ext = req.file.mimetype.split("/")[1] || "jpg";
+      const path = `avatars/${userId}/${Date.now()}.${ext}`;
+
+      const { error } = await supabase.storage
+        .from(BUILDER_BUCKET)
+        .upload(path, req.file.buffer, {
+          contentType: req.file.mimetype,
+          upsert: false,
+        });
+
+      if (error) throw new Error(`Storage upload failed: ${error.message}`);
+
+      const { data: urlData } = supabase.storage
+        .from(BUILDER_BUCKET)
+        .getPublicUrl(path);
+
+      return res.status(201).json({
+        url: urlData.publicUrl,
+        path,
+        size: req.file.size,
+        mimeType: req.file.mimetype,
+      });
+    } catch (e) {
+      console.error("Avatar upload error:", e.message);
+      return res.status(500).json({ message: e.message || "Upload failed" });
+    }
+  },
+);
+
+// Multer error handler for builder and avatar upload
 app.use((err, req, res, next) => {
   if (
     err instanceof multer.MulterError ||
-    (err && ALLOWED_MIME !== undefined && req.path === "/api/builder/upload")
+    (err &&
+      ALLOWED_MIME !== undefined &&
+      (req.path === "/api/builder/upload" ||
+        req.path === "/api/user/avatar-upload"))
   ) {
     return res.status(400).json({ message: err.message });
   }
