@@ -1942,19 +1942,17 @@ app.post("/api/builder/generate", async (req, res) => {
   }
 });
 
-// POST /api/builder/generate-3d — generate 3D model via Shap-E and return glB
+// POST /api/builder/generate-3d — wrap design image as texture on 3D object
 app.post("/api/builder/generate-3d", async (req, res) => {
   const userId = getUserId(req);
-  const { prompt } = req.body;
+  const { prompt, designImageUrl } = req.body;
 
   if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0) {
     return res.status(400).json({ message: "prompt is required" });
   }
 
-  if (!process.env.REACT_APP_HUGGING_FACE_TOKEN) {
-    return res.status(500).json({
-      message: "Hugging Face API token not configured on server",
-    });
+  if (!designImageUrl) {
+    return res.status(400).json({ message: "designImageUrl is required" });
   }
 
   try {
@@ -1962,38 +1960,14 @@ app.post("/api/builder/generate-3d", async (req, res) => {
       `🎭 Builder generate-3d: userId=${userId || "guest"}, prompt="${prompt.slice(0, 80)}..."`,
     );
 
-    const response = await fetch(
-      "https://api-inference.huggingface.co/models/openai/shap-e",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.REACT_APP_HUGGING_FACE_TOKEN}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          inputs: prompt.trim(),
-          parameters: {
-            num_inference_steps: 64,
-          },
-        }),
-      },
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(
-        `Shap-E API error: ${response.statusText} - ${errorText}`,
-      );
-    }
-
-    const glbBuffer = Buffer.from(await response.arrayBuffer());
-
-    // Return glB as binary blob
-    res.setHeader("Content-Type", "model/gltf-binary");
-    res.setHeader("Content-Length", glbBuffer.length);
-    res.send(glbBuffer);
-
-    console.log(`✅ Generated 3D model: ${glbBuffer.length} bytes`);
+    // Return design image wrapped as a 3D textured object
+    // Frontend will create a 3D scene with this image as a texture on a cube
+    return res.json({
+      message: "3D scene ready",
+      type: "textured-cube",
+      textureUrl: designImageUrl,
+      prompt: prompt.trim(),
+    });
   } catch (e) {
     console.error("Builder generate-3d error:", e.message);
     return res.status(500).json({
