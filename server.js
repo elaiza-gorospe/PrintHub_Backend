@@ -1942,6 +1942,66 @@ app.post("/api/builder/generate", async (req, res) => {
   }
 });
 
+// POST /api/builder/generate-3d — generate 3D model via Shap-E and return glB
+app.post("/api/builder/generate-3d", async (req, res) => {
+  const userId = getUserId(req);
+  const { prompt } = req.body;
+
+  if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0) {
+    return res.status(400).json({ message: "prompt is required" });
+  }
+
+  if (!process.env.REACT_APP_HUGGING_FACE_TOKEN) {
+    return res.status(500).json({
+      message: "Hugging Face API token not configured on server",
+    });
+  }
+
+  try {
+    console.log(
+      `🎭 Builder generate-3d: userId=${userId || "guest"}, prompt="${prompt.slice(0, 80)}..."`,
+    );
+
+    const response = await fetch(
+      "https://api-inference.huggingface.co/models/openai/shap-e",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.REACT_APP_HUGGING_FACE_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          inputs: prompt.trim(),
+          parameters: {
+            num_inference_steps: 64,
+          },
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `Shap-E API error: ${response.statusText} - ${errorText}`,
+      );
+    }
+
+    const glbBuffer = Buffer.from(await response.arrayBuffer());
+
+    // Return glB as binary blob
+    res.setHeader("Content-Type", "model/gltf-binary");
+    res.setHeader("Content-Length", glbBuffer.length);
+    res.send(glbBuffer);
+
+    console.log(`✅ Generated 3D model: ${glbBuffer.length} bytes`);
+  } catch (e) {
+    console.error("Builder generate-3d error:", e.message);
+    return res.status(500).json({
+      message: e.message || "3D generation failed",
+    });
+  }
+});
+
 // =================================================
 // PAYMONGO PAYMENT API
 // =================================================
