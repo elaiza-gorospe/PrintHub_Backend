@@ -2024,7 +2024,14 @@ app.post("/api/builder/generate-3d", async (req, res) => {
 const PAYMONGO_BASE = "https://api.paymongo.com/v1";
 
 function paymongoAuth() {
-  return Buffer.from(process.env.PAYMONGO_SECRET_KEY + ":").toString("base64");
+  const key = process.env.PAYMONGO_SECRET_KEY;
+  if (!key) {
+    console.warn(
+      "⚠️ PAYMONGO_SECRET_KEY not set. PayMongo requests will fail until configured.",
+    );
+    return "";
+  }
+  return Buffer.from(key + ":").toString("base64");
 }
 
 // POST /api/payments/checkout — create a PayMongo Checkout Session for an order
@@ -2090,10 +2097,20 @@ app.post("/api/payments/checkout", async (req, res) => {
       },
     };
 
+    const authHeader = paymongoAuth();
+    if (!authHeader) {
+      console.error(
+        "PayMongo checkout attempted but PAYMONGO_SECRET_KEY is not configured",
+      );
+      return res
+        .status(500)
+        .json({ message: "Payment provider not configured (missing secret)" });
+    }
+
     const pmRes = await fetch(`${PAYMONGO_BASE}/checkout_sessions`, {
       method: "POST",
       headers: {
-        Authorization: `Basic ${paymongoAuth()}`,
+        Authorization: `Basic ${authHeader}`,
         "Content-Type": "application/json",
         Accept: "application/json",
       },
@@ -2250,7 +2267,11 @@ app.post(
 
         const receivedSig = parts.te || parts.li; // test env uses 'te'
         if (receivedSig !== expectedSig) {
-          console.warn("PayMongo webhook: signature mismatch — ignoring");
+          const shortRec = String(receivedSig || "").slice(0, 8);
+          const shortExp = String(expectedSig || "").slice(0, 8);
+          console.warn(
+            `PayMongo webhook: signature mismatch — received=${shortRec} expected=${shortExp} — ignoring`,
+          );
           return;
         }
       }
@@ -2303,6 +2324,32 @@ app.post(
 
 // Start server with migrations
 (async () => {
+  // Log PayMongo configuration status to help with live conversion
+  function checkPaymongoConfig() {
+    const key = process.env.PAYMONGO_SECRET_KEY || null;
+    const webhook = process.env.PAYMONGO_WEBHOOK_SECRET || null;
+    if (!key) {
+      console.warn(
+        "⚠️ PAYMONGO_SECRET_KEY is not set. Payments will fail until configured.",
+      );
+    } else if (key.startsWith("sk_live_") || key.startsWith("live_")) {
+      console.log("✅ Using live PayMongo secret key");
+    } else if (key.startsWith("sk_test_") || key.startsWith("test_")) {
+      console.warn(
+        "⚠️ Using PayMongo test key. Switch to live key for production.",
+      );
+    } else {
+      console.log("PayMongo secret key appears set (unknown prefix)");
+    }
+
+    if (!webhook) {
+      console.warn(
+        "⚠️ PAYMONGO_WEBHOOK_SECRET is not set. Webhook signature verification disabled.",
+      );
+    }
+  }
+
+  checkPaymongoConfig();
   try {
     // Run database migrations
     const { execSync } = require("child_process");
