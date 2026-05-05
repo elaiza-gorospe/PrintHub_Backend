@@ -1242,6 +1242,39 @@ app.get("/api/products/:id", async (req, res) => {
   }
 });
 
+// GET low-stock products (admin dashboard)
+app.get("/api/admin/low-stock", async (req, res) => {
+  try {
+    const threshold = parseInt(req.query.threshold) || 10;
+    const limit = parseInt(req.query.limit) || 10;
+    const page = parseInt(req.query.page) || 1;
+    const skip = (page - 1) * limit;
+
+    const products = await prisma.product.findMany({
+      where: {
+        active: true,
+        deleted_at: null,
+        stock: { lte: threshold },
+      },
+      orderBy: { stock: "asc" },
+      skip,
+      take: limit,
+    });
+
+    const total = await prisma.product.count({
+      where: { active: true, deleted_at: null, stock: { lte: threshold } },
+    });
+
+    res.json({
+      products,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch low-stock products" });
+  }
+});
+
 // CREATE new product (admin only)
 app.post("/api/products", async (req, res) => {
   try {
