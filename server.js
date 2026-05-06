@@ -1303,6 +1303,8 @@ app.post("/api/products", async (req, res) => {
       delivery_options,
       quantity_options,
       shipping_options,
+      quantity_mode,
+      quantity_count,
       print_type,
       turnaround_hours,
       ai_prompt_rules,
@@ -1334,6 +1336,11 @@ app.post("/api/products", async (req, res) => {
         processing_options: processing_options || [],
         delivery_options: delivery_options || [],
         quantity_options: quantity_options || [],
+        ...(quantity_mode !== undefined && { quantity_mode }),
+        ...(quantity_count !== undefined && {
+          quantity_count:
+            quantity_count === null ? null : parseInt(quantity_count),
+        }),
         shipping_options: shipping_options || [],
         print_type,
         turnaround_hours: turnaround_hours ? parseInt(turnaround_hours) : null,
@@ -1382,6 +1389,8 @@ app.put("/api/products/:id", async (req, res) => {
       images,
       active,
       sku,
+      quantity_mode,
+      quantity_count,
     } = req.body;
 
     const product = await prisma.product.update({
@@ -1412,6 +1421,11 @@ app.put("/api/products/:id", async (req, res) => {
         ...(processing_options !== undefined && { processing_options }),
         ...(delivery_options !== undefined && { delivery_options }),
         ...(quantity_options !== undefined && { quantity_options }),
+        ...(quantity_mode !== undefined && { quantity_mode }),
+        ...(quantity_count !== undefined && {
+          quantity_count:
+            quantity_count === null ? null : parseInt(quantity_count),
+        }),
         ...(shipping_options !== undefined && { shipping_options }),
         ...(print_type && { print_type }),
         ...(turnaround_hours !== undefined && {

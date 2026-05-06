@@ -75,6 +75,8 @@ model Product {
   turnaround_hours Int?
   ai_prompt_rules String?  // strict AI generation/design rules for this product category
   images       String[]  @default([])
+  quantity_mode String?   // 'dropdown' | 'text' — admin-configurable quantity input mode
+  quantity_count Int?     // threshold for auto-selecting contact/quote when using text mode
   active       Boolean   @default(true)
   createdAt    DateTime  @default(now()) @map("created_at")
   updatedAt    DateTime  @updatedAt @map("updated_at")
