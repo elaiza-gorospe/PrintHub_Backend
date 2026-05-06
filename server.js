@@ -1449,6 +1449,36 @@ app.put("/api/products/:id", async (req, res) => {
   }
 });
 
+// POST /api/products/:id/add-stock — increment stock atomically and optionally update quantity_options
+app.post("/api/products/:id/add-stock", async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const { add, quantity_options } = req.body;
+
+    const inc = parseInt(add);
+    if (!inc || isNaN(inc) || inc <= 0)
+      return res.status(400).json({ message: "Invalid add amount" });
+
+    const updateData = {
+      stock: { increment: inc },
+    };
+    if (quantity_options !== undefined)
+      updateData.quantity_options = quantity_options;
+
+    const product = await prisma.product.update({
+      where: { id },
+      data: updateData,
+    });
+
+    res.json({ message: "Stock updated", product });
+  } catch (e) {
+    console.error(e);
+    if (e.code === "P2025")
+      return res.status(404).json({ message: "Product not found" });
+    res.status(500).json({ message: "Failed to add stock" });
+  }
+});
+
 // UPLOAD product image
 const PRODUCT_MAX_UPLOAD_SIZE = 3 * 1024 * 1024; // 3 MB
 const productUpload = multer({
