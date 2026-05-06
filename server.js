@@ -799,7 +799,11 @@ app.post("/api/orders", async (req, res) => {
         quantity,
         unit_price: parseFloat(unit.toFixed(2)),
         total_price: parseFloat(itemTotal.toFixed(2)),
-        customizations: it.customizations || {},
+        customizations: {
+          ...(it.customizations || {}),
+          // Preserve any imageUrl provided by frontend (AI design or product image)
+          ...(it.imageUrl ? { imageUrl: it.imageUrl } : {}),
+        },
       };
     });
 
@@ -2058,6 +2062,11 @@ app.post("/api/payments/checkout", async (req, res) => {
       amount: Math.round(parseFloat(item.unit_price) * 100), // in centavos
       name: item.product?.name || `Item #${item.productId}`,
       quantity: item.quantity,
+      // include an image URL if available (AI design stored in customizations or product gallery)
+      image_url:
+        (item.customizations && item.customizations.imageUrl) ||
+        (item.product && item.product.images && item.product.images[0]) ||
+        undefined,
     }));
 
     // If there is a shipping cost embedded in the total vs sum of items, add as a line item
