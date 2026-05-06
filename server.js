@@ -2101,17 +2101,32 @@ app.post("/api/payments/checkout", async (req, res) => {
       returnBase || process.env.FRONTEND_URL || "http://localhost:3001";
 
     // Build line items from order items
-    const lineItems = order.items.map((item) => ({
-      currency: "PHP",
-      amount: Math.round(parseFloat(item.unit_price) * 100), // in centavos
-      name: item.product?.name || `Item #${item.productId}`,
-      quantity: item.quantity,
-      // include an image URL if available (AI design stored in customizations or product gallery)
-      image_url:
+    // Build line items from order items, normalize image URLs and include both
+    // `image_url` and `images` (array) in case PayMongo expects either format.
+    const lineItems = order.items.map((item) => {
+      const rawImageUrl =
         (item.customizations && item.customizations.imageUrl) ||
         (item.product && item.product.images && item.product.images[0]) ||
-        undefined,
-    }));
+        undefined;
+
+      // Ensure image URL is absolute. If it's a relative path, prefix with frontend URL.
+      let imageUrl = rawImageUrl;
+      if (imageUrl && imageUrl.startsWith("/")) {
+        imageUrl = `${frontendUrl.replace(/\/$/, "")}${imageUrl}`;
+      }
+
+      return {
+        currency: "PHP",
+        amount: Math.round(parseFloat(item.unit_price) * 100), // in centavos
+        name: item.product?.name || `Item #${item.productId}`,
+        quantity: item.quantity,
+        image_url: imageUrl || undefined,
+        images: imageUrl ? [imageUrl] : undefined,
+      };
+    });
+
+    // Log line items for debugging (remove or reduce in production)
+    console.log("PayMongo line items:", JSON.stringify(lineItems, null, 2));
 
     // If there is a shipping cost embedded in the total vs sum of items, add as a line item
     const itemsTotal = order.items.reduce(
