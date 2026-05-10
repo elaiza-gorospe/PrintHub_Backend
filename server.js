@@ -9,6 +9,10 @@ const nodemailer = require("nodemailer");
 const multer = require("multer");
 const supabase = require("./db/supabase");
 const { generateImage } = require("./services/falai");
+657987655const {
+  generateModelFromText,
+  generateModelFromImage,
+} = require("./services/meshy");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1308,6 +1312,7 @@ app.post("/api/products", async (req, res) => {
       print_type,
       turnaround_hours,
       ai_prompt_rules,
+      category,
       images,
     } = req.body;
 
@@ -1345,6 +1350,7 @@ app.post("/api/products", async (req, res) => {
         print_type,
         turnaround_hours: turnaround_hours ? parseInt(turnaround_hours) : null,
         ai_prompt_rules: ai_prompt_rules || null,
+        category: category || "other",
         images: images || [],
         active: true,
       },
@@ -1386,6 +1392,7 @@ app.put("/api/products/:id", async (req, res) => {
       print_type,
       turnaround_hours,
       ai_prompt_rules,
+      category,
       images,
       active,
       sku,
@@ -1435,6 +1442,7 @@ app.put("/api/products/:id", async (req, res) => {
         }),
         ...(images !== undefined && { images }),
         ...(ai_prompt_rules !== undefined && { ai_prompt_rules }),
+        ...(category !== undefined && { category }),
         ...(active !== undefined && { active }),
       },
     });
@@ -1930,7 +1938,89 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
-// POST /api/builder/generate — generate an image via fal.ai and store in Supabase
+// POST /api/builder/generate-image — generate a 2D design image via fal.ai and store in Supabase
+app.post("/api/builder/generate-image", async (req, res) => {
+  const userId = getUserId(req);
+  const rawOwner = userId
+    ? String(userId)
+    : req.headers["x-forwarded-for"] || req.ip || "guest";
+  const ownerKey = String(rawOwner).replace(/[^a-zA-Z0-9_-]/g, "_");
+
+  const { prompt, imageSize } = req.body;
+  if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0)
+    return res.status(400).json({ message: "prompt is required" });
+  if (prompt.trim().length > 2000)
+    return res.status(400).json({ message: "prompt must be 2000 characters or fewer" });
+
+  // Per-user cooldown (shared with 3D generation)
+  const now = Date.now();
+  const last = generationCooldown[ownerKey] || 0;
+  const remaining = GENERATION_COOLDOWN_MS - (now - last);
+  if (remaining > 0) {
+    return res.status(429).json({
+      message: `Please wait ${Math.ceil(remaining / 1000)} seconds before generating again`,
+      retryAfterMs: remaining,
+    });
+  }
+  generationCooldown[ownerKey] = now;
+
+  try {
+    console.log(
+      `🎨 Builder generate-image (2D): owner=${ownerKey}${userId ? ` (userId=${userId})` : " (guest)"}, prompt="${prompt.slice(0, 80)}..."`,
+    );
+
+    const result = await generateImage({
+      prompt: prompt.trim(),
+      imageSize: imageSize || "square_hd",
+    });
+
+    // Upload to Supabase so URL is stable (Pollinations URLs are ephemeral)
+    await ensureBucket();
+    let imageUrl = result.url;
+    let stored = false;
+    let storagePath = null;
+
+    try {
+      const imgRes = await fetch(result.url);
+      if (imgRes.ok) {
+        const imgBuffer = Buffer.from(await imgRes.arrayBuffer());
+        const ext = result.url.includes(".png") ? "png" : "jpg";
+        storagePath = `generated-images/${ownerKey}/${Date.now()}.${ext}`;
+        const { error: storageErr } = await supabase.storage
+          .from(BUILDER_BUCKET)
+          .upload(storagePath, imgBuffer, {
+            contentType: ext === "png" ? "image/png" : "image/jpeg",
+            upsert: false,
+          });
+        if (!storageErr) {
+          const { data: urlData } = supabase.storage
+            .from(BUILDER_BUCKET)
+            .getPublicUrl(storagePath);
+          imageUrl = urlData.publicUrl;
+          stored = true;
+        }
+      }
+    } catch (uploadErr) {
+      console.warn("Supabase upload failed (non-fatal):", uploadErr.message);
+    }
+
+    console.log(`✅ Generated 2D image${stored ? " + stored: " + storagePath : " (Supabase skipped)"}`);
+    return res.json({
+      imageUrl,
+      width: result.width,
+      height: result.height,
+      prompt: prompt.trim(),
+      stored,
+      path: storagePath,
+    });
+  } catch (e) {
+    delete generationCooldown[ownerKey];
+    console.error("Builder generate-image error:", e.message);
+    return res.status(500).json({ message: e.message || "Image generation failed" });
+  }
+});
+
+// POST /api/builder/generate — generate a 3D model via Meshy and store in Supabase
 app.post("/api/builder/generate", async (req, res) => {
   const userId = getUserId(req);
   // allow guests: derive an ownerKey for cooldown/storage (prefer userId when present)
@@ -1940,7 +2030,7 @@ app.post("/api/builder/generate", async (req, res) => {
   // sanitize owner key for use in storage paths and map keys
   const ownerKey = String(rawOwner).replace(/[^a-zA-Z0-9_-]/g, "_");
 
-  const { prompt, model, imageSize, productId, sourceImageUrl } = req.body;
+  const { prompt, quality, productId } = req.body;
   if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0)
     return res.status(400).json({ message: "prompt is required" });
 
@@ -1964,47 +2054,43 @@ app.post("/api/builder/generate", async (req, res) => {
 
   try {
     console.log(
-      `🎨 Builder generate: owner=${ownerKey}${userId ? ` (userId=${userId})` : " (guest)"}, productId=${productId || "N/A"}, sourceImage=${sourceImageUrl ? "yes" : "no"}, prompt="${prompt.slice(0, 80)}..."`,
+      `🎨 Builder generate (3D): owner=${ownerKey}${userId ? ` (userId=${userId})` : " (guest)"}, productId=${productId || "N/A"}, prompt="${prompt.slice(0, 80)}..."`,
     );
 
-    const result = await generateImage({
+    // Call Meshy text-to-3D
+    const { glbUrl, meshyTaskId } = await generateModelFromText({
       prompt: prompt.trim(),
-      model: model || undefined,
-      imageSize: imageSize || "square_hd",
+      quality: quality || "standard",
     });
 
-    // Download generated image and persist in Supabase (both mock and production)
-    // In mock mode Pollinations generates lazily — fetching server-side waits for the real image.
-    // Returning a Supabase URL to the browser avoids the blank-placeholder race condition.
+    // Download generated GLB and persist in Supabase
     await ensureBucket();
 
-    const sourceLabel =
-      process.env.FAL_MOCK === "true" ? "Pollinations" : "fal.ai";
-    console.log(`⬇️  Fetching generated image from ${sourceLabel}…`);
-    const imgRes = await fetch(result.url);
-    if (!imgRes.ok)
-      throw new Error(`Failed to fetch generated image from ${sourceLabel}`);
-    const imgBuffer = Buffer.from(await imgRes.arrayBuffer());
+    console.log(`⬇️  Fetching generated GLB from Meshy…`);
+    const glbRes = await fetch(glbUrl);
+    if (!glbRes.ok)
+      throw new Error(
+        `Failed to fetch generated GLB from Meshy (${glbRes.status})`,
+      );
+    const glbBuffer = Buffer.from(await glbRes.arrayBuffer());
 
-    const storagePath = `generated/${ownerKey}/${Date.now()}.jpg`;
+    const storagePath = `generated-models/${ownerKey}/${Date.now()}.glb`;
     const { error: storageErr } = await supabase.storage
       .from(BUILDER_BUCKET)
-      .upload(storagePath, imgBuffer, {
-        contentType: "image/jpeg",
+      .upload(storagePath, glbBuffer, {
+        contentType: "model/gltf-binary",
         upsert: false,
       });
 
     if (storageErr) {
-      // Non-fatal: return the source URL directly if Supabase storage fails
+      // Non-fatal: return the Meshy URL directly if Supabase storage fails
       console.warn(
-        "Storage persist failed, returning source URL:",
+        "Storage persist failed, returning Meshy URL:",
         storageErr.message,
       );
       return res.json({
-        url: result.url,
-        width: result.width,
-        height: result.height,
-        seed: result.seed,
+        glbUrl,
+        meshyTaskId,
         stored: false,
       });
     }
@@ -2013,21 +2099,115 @@ app.post("/api/builder/generate", async (req, res) => {
       .from(BUILDER_BUCKET)
       .getPublicUrl(storagePath);
 
-    console.log(`✅ Generated + stored: ${storagePath}`);
+    console.log(`✅ Generated 3D model + stored: ${storagePath}`);
     return res.json({
-      url: urlData.publicUrl,
-      falUrl: result.url,
-      width: result.width,
-      height: result.height,
-      seed: result.seed,
+      glbUrl: urlData.publicUrl,
+      meshyUrl: glbUrl,
+      meshyTaskId,
       stored: true,
       path: storagePath,
     });
   } catch (e) {
     // Reset cooldown on failure so user can retry
     delete generationCooldown[ownerKey];
-    console.error("Builder generate error:", e.message);
-    return res.status(500).json({ message: e.message || "Generation failed" });
+    console.error("Builder generate (3D) error:", e.message);
+    return res
+      .status(500)
+      .json({ message: e.message || "3D generation failed" });
+  }
+});
+
+// POST /api/builder/generate-from-image — generate a 3D model from uploaded image via Meshy
+app.post("/api/builder/generate-from-image", async (req, res) => {
+  const userId = getUserId(req);
+  const rawOwner = userId
+    ? String(userId)
+    : req.headers["x-forwarded-for"] || req.ip || "guest";
+  const ownerKey = String(rawOwner).replace(/[^a-zA-Z0-9_-]/g, "_");
+
+  const { imageUrl, description, quality } = req.body;
+  if (
+    !imageUrl ||
+    typeof imageUrl !== "string" ||
+    imageUrl.trim().length === 0
+  ) {
+    return res.status(400).json({ message: "imageUrl is required" });
+  }
+
+  // Per-user cooldown
+  const now = Date.now();
+  const last = generationCooldown[ownerKey] || 0;
+  const remaining = GENERATION_COOLDOWN_MS - (now - last);
+  if (remaining > 0) {
+    return res.status(429).json({
+      message: `Please wait ${Math.ceil(remaining / 1000)} seconds before generating again`,
+      retryAfterMs: remaining,
+    });
+  }
+
+  generationCooldown[ownerKey] = now;
+
+  try {
+    console.log(
+      `🎨 Builder generate-from-image: owner=${ownerKey}${userId ? ` (userId=${userId})` : " (guest)"}, image=${imageUrl.slice(0, 60)}...${description ? ` description="${description.slice(0, 60)}..."` : ""}`,
+    );
+
+    // Call Meshy image-to-3D
+    const { glbUrl, meshyTaskId } = await generateModelFromImage({
+      imageUrl: imageUrl.trim(),
+      description: description ? description.trim() : undefined,
+      quality: quality || "standard",
+    });
+
+    // Download generated GLB and persist in Supabase
+    await ensureBucket();
+
+    console.log(`⬇️  Fetching generated GLB from Meshy…`);
+    const glbRes = await fetch(glbUrl);
+    if (!glbRes.ok)
+      throw new Error(
+        `Failed to fetch generated GLB from Meshy (${glbRes.status})`,
+      );
+    const glbBuffer = Buffer.from(await glbRes.arrayBuffer());
+
+    const storagePath = `generated-models/${ownerKey}/${Date.now()}.glb`;
+    const { error: storageErr } = await supabase.storage
+      .from(BUILDER_BUCKET)
+      .upload(storagePath, glbBuffer, {
+        contentType: "model/gltf-binary",
+        upsert: false,
+      });
+
+    if (storageErr) {
+      console.warn(
+        "Storage persist failed, returning Meshy URL:",
+        storageErr.message,
+      );
+      return res.json({
+        glbUrl,
+        meshyTaskId,
+        stored: false,
+      });
+    }
+
+    const { data: urlData } = supabase.storage
+      .from(BUILDER_BUCKET)
+      .getPublicUrl(storagePath);
+
+    console.log(`✅ Generated 3D model from image + stored: ${storagePath}`);
+    return res.json({
+      glbUrl: urlData.publicUrl,
+      meshyUrl: glbUrl,
+      meshyTaskId,
+      stored: true,
+      path: storagePath,
+    });
+  } catch (e) {
+    delete generationCooldown[ownerKey];
+    console.error("Builder generate-from-image error:", e.message);
+    return res
+      .status(500)
+      .json({ message: e.message || "3D generation from image failed" });
   }
 });
 
