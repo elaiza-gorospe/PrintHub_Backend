@@ -9,7 +9,7 @@ const nodemailer = require("nodemailer");
 const multer = require("multer");
 const supabase = require("./db/supabase");
 const { generateImage } = require("./services/falai");
-657987655const {
+const {
   generateModelFromText,
   generateModelFromImage,
 } = require("./services/meshy");
@@ -1950,7 +1950,9 @@ app.post("/api/builder/generate-image", async (req, res) => {
   if (!prompt || typeof prompt !== "string" || prompt.trim().length === 0)
     return res.status(400).json({ message: "prompt is required" });
   if (prompt.trim().length > 2000)
-    return res.status(400).json({ message: "prompt must be 2000 characters or fewer" });
+    return res
+      .status(400)
+      .json({ message: "prompt must be 2000 characters or fewer" });
 
   // Per-user cooldown (shared with 3D generation)
   const now = Date.now();
@@ -2004,7 +2006,9 @@ app.post("/api/builder/generate-image", async (req, res) => {
       console.warn("Supabase upload failed (non-fatal):", uploadErr.message);
     }
 
-    console.log(`✅ Generated 2D image${stored ? " + stored: " + storagePath : " (Supabase skipped)"}`);
+    console.log(
+      `✅ Generated 2D image${stored ? " + stored: " + storagePath : " (Supabase skipped)"}`,
+    );
     return res.json({
       imageUrl,
       width: result.width,
@@ -2016,7 +2020,9 @@ app.post("/api/builder/generate-image", async (req, res) => {
   } catch (e) {
     delete generationCooldown[ownerKey];
     console.error("Builder generate-image error:", e.message);
-    return res.status(500).json({ message: e.message || "Image generation failed" });
+    return res
+      .status(500)
+      .json({ message: e.message || "Image generation failed" });
   }
 });
 
