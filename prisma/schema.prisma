@@ -74,6 +74,7 @@ model Product {
   print_type   String?   // e.g. digital, offset, screen
   turnaround_hours Int?
   ai_prompt_rules String?  // strict AI generation/design rules for this product category
+  print_zones  String[]  @default([])  // e.g. ["front","back","left_sleeve","right_sleeve"]
   category     String?   @default("other")  // tshirt | mug | calling_card | other
   images       String[]  @default([])
   quantity_mode String?   // 'dropdown' | 'text' — admin-configurable quantity input mode
