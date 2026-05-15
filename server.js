@@ -9,6 +9,7 @@ const nodemailer = require("nodemailer");
 const multer = require("multer");
 const supabase = require("./db/supabase");
 const { generateImage } = require("./services/falai");
+
 const {
   generateModelFromText,
   generateModelFromImage,
@@ -17,8 +18,224 @@ const {
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+app.use(cors({
+  origin: ["http://localhost:3000", "http://localhost:3001"],
+  methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+  credentials: true
+}));
 app.use(bodyParser.json());
+
+// =================================================
+// AI CHATBOT API (Gemini)
+// =================================================
+const formatMoney = (value, currency = "PHP") => {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return null;
+  return new Intl.NumberFormat("en-PH", {
+    style: "currency",
+    currency,
+  }).format(amount);
+};
+
+const splitOption = (option) => {
+  if (!option || typeof option !== "string") return null;
+  const [label, price] = option.split("|").map((part) => part.trim());
+  return price ? `${label}: ${price}` : label;
+};
+
+const formatOptions = (options = [], limit = 5) =>
+  options.map(splitOption).filter(Boolean).slice(0, limit).join(", ");
+
+const normalizeSearchText = (value = "") =>
+  String(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const findProductForQuestion = (question, products) => {
+  const q = normalizeSearchText(question);
+  if (!q) return null;
+
+  const aliases = [
+    ["business card", "calling card", "card"],
+    ["tarpaulin", "tarp", "banner"],
+    ["t-shirt", "tshirt", "shirt"],
+    ["sticker", "label"],
+    ["notebook", "journal"],
+  ];
+
+  return products.find((product) => {
+    const name = normalizeSearchText(product.name);
+    const sku = normalizeSearchText(product.sku);
+    const terms = [name, sku];
+
+    aliases.forEach((group) => {
+      if (group.some((term) => name.includes(normalizeSearchText(term)))) {
+        terms.push(...group.map(normalizeSearchText));
+      }
+    });
+
+    return terms.some((term) => term && q.includes(term));
+  });
+};
+
+const buildProductSummary = (product) => {
+  const basePrice = formatMoney(product.price, product.currency) || product.price;
+  const quantityOptions = formatOptions(product.quantity_options);
+  const shippingOptions = formatOptions(product.shipping_options);
+  const sizes = formatOptions(product.size_options);
+  const materials = formatOptions(product.material_options);
+  const turnaround = product.turnaround_hours
+    ? `${Math.ceil(product.turnaround_hours / 24)} business day(s)`
+    : "varies by order";
+
+  return [
+    `${product.name} starts at ${basePrice}.`,
+    product.description,
+    quantityOptions ? `Quantity pricing: ${quantityOptions}.` : "",
+    sizes ? `Sizes: ${sizes}.` : "",
+    materials ? `Materials: ${materials}.` : "",
+    `Turnaround: ${turnaround}.`,
+    shippingOptions ? `Shipping: ${shippingOptions}.` : "",
+    "Final pricing can change based on size, material, finish, quantity, and rush options.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+};
+
+const buildLocalChatReply = (question, products) => {
+  const q = normalizeSearchText(question);
+  const product = findProductForQuestion(question, products);
+
+  if (product) return buildProductSummary(product);
+
+  if (q.includes("product") || q.includes("service") || q.includes("offer")) {
+    const names = products.map((p) => p.name).slice(0, 12).join(", ");
+    return `PrintHub offers printing products and services including: ${names}. You can ask me about pricing, sizes, materials, turnaround, delivery, file requirements, or bulk orders for any of these.`;
+  }
+
+  if (q.includes("file") || q.includes("format") || q.includes("requirements")) {
+    return "For print files, PrintHub accepts PDF, PNG, JPG, AI, and PSD. For best results, use high-resolution files, CMYK color when possible, and include bleed/safe margins for trimmed products.";
+  }
+
+  if (q.includes("payment") || q.includes("pay")) {
+    return "PrintHub supports GCash, PayMaya, bank transfer, and card/online checkout when available.";
+  }
+
+  if (q.includes("delivery") || q.includes("shipping")) {
+    return "PrintHub supports pickup and delivery options. Many products include free standard pickup/shipping options, with express delivery available for an added fee depending on the product.";
+  }
+
+  if (q.includes("bulk") || q.includes("discount")) {
+    return "Bulk orders are supported. Many products already have lower per-piece pricing at higher quantities, and custom bulk quotes can be requested for larger jobs.";
+  }
+
+  return "I can help with PrintHub products, pricing, quantity options, materials, file requirements, delivery, payments, bulk orders, and order support. What product would you like to ask about?";
+};
+
+const buildCatalogContext = (products) =>
+  products
+    .map((product) => {
+      const basePrice =
+        formatMoney(product.price, product.currency) || String(product.price);
+      return [
+        `Product: ${product.name}`,
+        `SKU: ${product.sku || "N/A"}`,
+        `Description: ${product.description || "N/A"}`,
+        `Base price: ${basePrice}`,
+        `Print type: ${product.print_type || "N/A"}`,
+        `Turnaround hours: ${product.turnaround_hours || "varies"}`,
+        `Sizes: ${formatOptions(product.size_options) || "N/A"}`,
+        `Materials: ${formatOptions(product.material_options) || "N/A"}`,
+        `Sides: ${formatOptions(product.side_options) || "N/A"}`,
+        `Finishing: ${formatOptions(product.finishing_options) || "N/A"}`,
+        `Quantities: ${formatOptions(product.quantity_options, 8) || "N/A"}`,
+        `Shipping: ${formatOptions(product.shipping_options) || "N/A"}`,
+      ].join("\n");
+    })
+    .join("\n\n");
+
+app.post("/api/chat", async (req, res) => {
+  const { messages } = req.body;
+
+  if (!messages || !Array.isArray(messages)) {
+    return res.status(400).json({ reply: "Invalid messages format." });
+  }
+
+  const SYSTEM_PROMPT = `You are PrintHub Assistant, a friendly and knowledgeable AI chatbot for PrintHub — a professional printing service. Help customers with:
+- Pricing and quotes (business cards, flyers, posters, tarpaulins, mugs, shirts, notebooks, etc.)
+- Delivery times and shipping options
+- Turnaround time for orders
+- Design services and file requirements (PDF, PNG, JPG, AI, PSD)
+- Payment methods (GCash, PayMaya, Bank Transfer)
+- Returns and refunds policy
+- Bulk order discounts
+- Order status and tracking
+Be concise, warm, and helpful. If you don't know exact pricing, tell the customer to contact PrintHub directly for a custom quote.`;
+
+  try {
+    const products = await prisma.product.findMany({
+      where: { active: true, deleted_at: null },
+      orderBy: { name: "asc" },
+      take: 50,
+    });
+    const latestUserMessage = [...messages]
+      .reverse()
+      .find((message) => message.role === "user")
+      ?.parts?.map((part) => part.text)
+      .filter(Boolean)
+      .join(" ");
+    const fallbackReply = buildLocalChatReply(latestUserMessage || "", products);
+    const catalogPrompt = `${SYSTEM_PROMPT}
+
+Use the product catalog below as the source of truth for PrintHub product and service questions. If the exact requested option is not listed, share the closest listed options and suggest requesting a custom quote. Do not invent prices, policies, phone numbers, or addresses.
+
+General PrintHub service facts:
+- Accepted file formats: PDF, PNG, JPG, AI, PSD.
+- Payment methods: GCash, PayMaya, Bank Transfer, and card/online checkout when available.
+- Bulk orders are supported and may receive custom pricing.
+- Standard delivery/pickup and express options vary by product.
+
+Product catalog:
+${buildCatalogContext(products) || "No active products are currently available."}`;
+
+    if (!process.env.GEMINI_API_KEY) {
+      return res.json({ reply: fallbackReply });
+    }
+
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: catalogPrompt }] },
+          contents: messages,
+          generationConfig: { temperature: 0.7, maxOutputTokens: 512 },
+        }),
+      }
+    );
+
+    const data = await response.json();
+    if (!response.ok) {
+      console.error("Gemini API error:", data);
+      return res.json({ reply: fallbackReply });
+    }
+
+    const reply =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      fallbackReply;
+
+    res.json({ reply });
+  } catch (err) {
+    console.error("Gemini API error:", err);
+    res.json({
+      reply:
+        "I can help with PrintHub products, pricing, quantity options, file requirements, delivery, and payments. Please ask me about a product like business cards, flyers, posters, shirts, mugs, stickers, or notebooks.",
+    });
+  }
+});
 
 const roleToDb = (role = "customer") => {
   if (role === "admin") return 0;
@@ -35,15 +252,18 @@ const roleFromDb = (num) => {
 const otpStore = {};
 let transporter = null;
 
-// SMTP disabled — set to true and configure EMAIL_USER/EMAIL_PASS to enable
-const SMTP_ENABLED = false;
+// SMTP is enabled automatically when Gmail credentials are configured.
+// Set SMTP_ENABLED=false in .env if you intentionally want console-only OTPs.
+const SMTP_ENABLED = process.env.SMTP_ENABLED !== "false";
+const EMAIL_USER = process.env.EMAIL_USER?.trim();
+const EMAIL_PASS = process.env.EMAIL_PASS?.replace(/\s/g, "");
 
-if (SMTP_ENABLED && process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+if (SMTP_ENABLED && EMAIL_USER && EMAIL_PASS) {
   transporter = nodemailer.createTransport({
     service: "gmail",
     auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS,
+      user: EMAIL_USER,
+      pass: EMAIL_PASS,
     },
   });
 
@@ -52,7 +272,9 @@ if (SMTP_ENABLED && process.env.EMAIL_USER && process.env.EMAIL_PASS) {
     else console.log("✅ Email transporter ready:", success);
   });
 } else {
-  console.log("⚠️ SMTP disabled. OTP will be logged to console (dev mode).");
+  console.log(
+    "SMTP disabled or missing EMAIL_USER/EMAIL_PASS. OTP will be logged to console (dev mode).",
+  );
 }
 
 // login
@@ -109,7 +331,7 @@ app.post("/api/login", async (req, res) => {
     if (transporter) {
       try {
         await transporter.sendMail({
-          from: process.env.EMAIL_USER,
+          from: EMAIL_USER,
           to: email,
           subject: "Account Reactivation OTP",
           text: `Your reactivation OTP is: ${code}. It expires in 5 minutes.`,
@@ -223,7 +445,7 @@ app.post("/api/register/send-otp", (req, res) => {
       if (transporter) {
         try {
           await transporter.sendMail({
-            from: process.env.EMAIL_USER,
+            from: EMAIL_USER,
             to: email,
             subject: "Your OTP Code (Registration)",
             text: `Your OTP is: ${code}. It expires in 5 minutes.`,
@@ -295,7 +517,7 @@ app.post("/api/password/send-otp", async (req, res) => {
     if (transporter) {
       try {
         await transporter.sendMail({
-          from: process.env.EMAIL_USER,
+          from: EMAIL_USER,
           to: email,
           subject: "Your OTP Code (Password Change)",
           text: `Your OTP is: ${code}. It expires in 5 minutes.`,
@@ -596,7 +818,7 @@ app.post("/api/password/request-otp", async (req, res) => {
     if (transporter) {
       try {
         await transporter.sendMail({
-          from: process.env.EMAIL_USER,
+          from: EMAIL_USER,
           to: email,
           subject: "Your OTP Code (Password Change)",
           text: `Your OTP is: ${code}. It expires in 5 minutes.`,
@@ -2261,6 +2483,51 @@ app.post("/api/builder/generate-3d", async (req, res) => {
 
 const PAYMONGO_BASE = "https://api.paymongo.com/v1";
 
+function buildReceiptPayload(order, statusOverride) {
+  const paymentStatus = statusOverride || order.payment_status || "unpaid";
+  const isPaid = paymentStatus === "paid";
+  const customerName =
+    [order.user?.first_name, order.user?.last_name].filter(Boolean).join(" ") ||
+    order.user?.email ||
+    "Customer";
+  const customerEmail = order.user?.email || "";
+  const receiptNo = `PMG-${String(order.id).padStart(6, "0")}`;
+  const paidAt =
+    isPaid && order.updatedAt ? new Date(order.updatedAt).toISOString() : null;
+
+  return {
+    receiptNo,
+    orderId: order.id,
+    customerName,
+    customerEmail,
+    status: paymentStatus,
+    paymentStatus,
+    paymentMethod: order.payment_method || "Online payment",
+    paymentReference: order.payment_reference || order.paymongo_session_id || "",
+    total: order.total,
+    currency: order.currency || "PHP",
+    issuedAt: paidAt || new Date().toISOString(),
+    paidAt,
+    items: (order.items || []).map((item) => ({
+      id: item.id,
+      productName: item.product?.name || `Product #${item.productId}`,
+      quantity: item.quantity,
+      unitPrice: item.unit_price,
+      totalPrice: item.total_price,
+    })),
+    mockEmail: {
+      to: customerEmail,
+      subject: isPaid
+        ? `Payment successful - PMG Receipt ${receiptNo}`
+        : `Payment update - PMG Order #${order.id}`,
+      status: isPaid ? "success" : "not_paid",
+      body: isPaid
+        ? `Hi ${customerName}, your payment for Order #${order.id} was successful. Your e-receipt number is ${receiptNo}.`
+        : `Hi ${customerName}, payment for Order #${order.id} is not yet confirmed. You can retry payment from My Orders.`,
+    },
+  };
+}
+
 function paymongoAuth() {
   const key = process.env.PAYMONGO_SECRET_KEY;
   if (!key) {
@@ -2273,6 +2540,133 @@ function paymongoAuth() {
 }
 
 // POST /api/payments/checkout — create a PayMongo Checkout Session for an order
+app.get("/api/user/:id/payment-logs", async (req, res) => {
+  const userId = parseInt(req.params.id);
+  if (isNaN(userId)) return res.status(400).json({ message: "Invalid userId" });
+
+  try {
+    const orders = await prisma.order.findMany({
+      where: { userId, deleted_at: null },
+      include: {
+        user: true,
+        items: { include: { product: true } },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    res.json(orders.map((order) => buildReceiptPayload(order)));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch payment logs" });
+  }
+});
+
+app.get("/api/orders/:id/receipt", async (req, res) => {
+  const orderId = parseInt(req.params.id);
+  if (isNaN(orderId))
+    return res.status(400).json({ message: "Invalid orderId" });
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        user: true,
+        items: { include: { product: true } },
+      },
+    });
+
+    if (!order || order.deleted_at) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    res.json(buildReceiptPayload(order));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch receipt" });
+  }
+});
+
+app.post("/api/orders/:id/return-complaint", async (req, res) => {
+  const orderId = parseInt(req.params.id);
+  const { userId, reason, details } = req.body;
+
+  if (isNaN(orderId))
+    return res.status(400).json({ message: "Invalid orderId" });
+  if (!reason || !String(reason).trim()) {
+    return res.status(400).json({ message: "Complaint reason is required" });
+  }
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        user: true,
+        items: { include: { product: true } },
+      },
+    });
+
+    if (!order || order.deleted_at) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+
+    if (userId && order.userId !== parseInt(userId)) {
+      return res.status(403).json({ message: "Order does not belong to user" });
+    }
+
+    if (order.payment_status !== "paid" || order.status !== "delivered") {
+      return res.status(400).json({
+        message:
+          "Return complaints can only be submitted after a paid order is delivered.",
+      });
+    }
+
+    const productNames = (order.items || [])
+      .map((item) => item.product?.name || `Product #${item.productId}`)
+      .join(", ");
+    const customerName =
+      [order.user?.first_name, order.user?.last_name].filter(Boolean).join(" ") ||
+      "Customer";
+    const customerEmail = order.user?.email || "";
+
+    const inquiry = await prisma.inquiry.create({
+      data: {
+        userId: order.userId,
+        product_title: productNames || `Order #${order.id}`,
+        subject: `Return complaint for Order #${order.id}`,
+        name: customerName,
+        email: customerEmail,
+        quantity: String(
+          (order.items || []).reduce((sum, item) => sum + item.quantity, 0),
+        ),
+        other: [`Reason: ${reason}`, details && `Details: ${details}`]
+          .filter(Boolean)
+          .join("\n"),
+        status: "new",
+      },
+    });
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: orderId },
+      data: { status: "return_requested" },
+      include: { items: true, user: true },
+    });
+
+    res.status(201).json({
+      message: "Return complaint submitted",
+      inquiry,
+      order: updatedOrder,
+      mockEmail: {
+        to: customerEmail,
+        subject: `Return complaint received - Order #${order.id}`,
+        body: `Hi ${customerName}, we received your return complaint for Order #${order.id}. Our staff will review it in the admin inquiries module.`,
+      },
+    });
+  } catch (e) {
+    console.error("Return complaint failed:", e);
+    res.status(500).json({ message: "Failed to submit return complaint" });
+  }
+});
+
 app.post("/api/payments/checkout", async (req, res) => {
   const { orderId, returnBase } = req.body;
   if (!orderId) return res.status(400).json({ message: "orderId is required" });
@@ -2414,14 +2808,9 @@ app.get("/api/payments/:orderId/status", async (req, res) => {
   try {
     const order = await prisma.order.findUnique({
       where: { id: orderId },
-      select: {
-        id: true,
-        payment_status: true,
-        payment_method: true,
-        payment_reference: true,
-        paymongo_session_id: true,
-        status: true,
-        total: true,
+      include: {
+        user: true,
+        items: { include: { product: true } },
       },
     });
 
@@ -2429,7 +2818,11 @@ app.get("/api/payments/:orderId/status", async (req, res) => {
 
     // If already marked paid in DB, return without calling PayMongo
     if (order.payment_status === "paid") {
-      return res.json({ payment_status: "paid", order });
+      return res.json({
+        payment_status: "paid",
+        order,
+        receipt: buildReceiptPayload(order),
+      });
     }
 
     // If we have a session ID, check PayMongo for the latest status
@@ -2460,7 +2853,7 @@ app.get("/api/payments/:orderId/status", async (req, res) => {
           const reference =
             payments.length > 0 ? payments[0].id : order.paymongo_session_id;
 
-          await prisma.order.update({
+          const paidOrder = await prisma.order.update({
             where: { id: orderId },
             data: {
               payment_status: "paid",
@@ -2468,11 +2861,16 @@ app.get("/api/payments/:orderId/status", async (req, res) => {
               payment_method: pmPaymentMethod,
               payment_reference: reference,
             },
+            include: {
+              user: true,
+              items: { include: { product: true } },
+            },
           });
 
           return res.json({
             payment_status: "paid",
-            order: { ...order, payment_status: "paid" },
+            order: paidOrder,
+            receipt: buildReceiptPayload(paidOrder),
           });
         }
       }
@@ -2580,7 +2978,7 @@ app.post(
   },
 );
 
-// Start server with migrations
+// Start server. Run migrations only when explicitly requested.
 (async () => {
   // Log PayMongo configuration status to help with live conversion
   function checkPaymongoConfig() {
@@ -2608,14 +3006,18 @@ app.post(
   }
 
   checkPaymongoConfig();
-  try {
-    // Run database migrations
-    const { execSync } = require("child_process");
-    console.log("Running Prisma migrations...");
-    execSync("npx prisma migrate deploy", { stdio: "inherit" });
-    console.log("✅ Migrations completed");
-  } catch (e) {
-    console.log("⚠️ Migration warning (may already be up to date):", e.message);
+if (process.env.RUN_MIGRATIONS === "true") {
+    try {
+      // Run database migrations
+      const { execSync } = require("child_process");
+      console.log("Running Prisma migrations...");
+      execSync("npx prisma migrate deploy", { stdio: "inherit" });
+      console.log("Migrations completed");
+    } catch (e) {
+      console.log("Migration warning (may already be up to date):", e.message);
+    }
+  } else {
+    console.log("Skipping Prisma migrations on startup.");
   }
 
   app.listen(PORT, "0.0.0.0", () => {
