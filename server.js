@@ -959,10 +959,6 @@ app.post("/api/reset-password", async (req, res) => {
   }
 });
 
-// START SERVER
-app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-});
 
 // -------------------------
 // Orders API
