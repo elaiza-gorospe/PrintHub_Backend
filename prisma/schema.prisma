@@ -28,6 +28,7 @@ model User {
   updatedAt   DateTime  @updatedAt @map("updated_at")
   orders       Order[]
   inquiries    Inquiry[]
+  cartItems    CartItem[]
 }
 
 model ArchivedUser {
@@ -85,6 +86,7 @@ model Product {
   deleted_at   DateTime? @map("deleted_at")
 
   orderItems   OrderItem[]
+  cartItems    CartItem[]
 }
 
 model Order {
@@ -122,6 +124,24 @@ model OrderItem {
   total_price  Decimal  @db.Decimal(14,2)
   customizations Json?
   createdAt    DateTime @default(now())
+}
+
+model CartItem {
+  id             Int      @id @default(autoincrement())
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId         Int
+  product        Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  productId      Int?
+  title          String
+  price          Decimal  @db.Decimal(14,2)
+  qty            Int      @default(1)
+  productImage   String?
+  customizations Json?
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@index([userId])
+  @@index([productId])
 }
 
 model Inquiry {

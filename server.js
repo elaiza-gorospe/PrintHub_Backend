@@ -1250,6 +1250,168 @@ app.get("/api/user/:id/orders", async (req, res) => {
   }
 });
 
+const normalizeCartCustomizations = (value) => {
+  if (!value || typeof value !== "object") return {};
+  return value;
+};
+
+const cartItemPayload = (item) => ({
+  id: item.id,
+  productId: item.productId,
+  title: item.title,
+  name: item.title,
+  price: Number(item.price),
+  qty: item.qty,
+  productImage:
+    item.productImage ||
+    item.customizations?.imageUrl ||
+    item.product?.images?.[0] ||
+    null,
+  images: item.product?.images || [],
+  customizations: item.customizations || {},
+});
+
+// Customer cart API - shared by web and mobile clients.
+app.get("/api/user/:id/cart", async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  if (!userId) return res.status(400).json({ message: "Invalid user id" });
+
+  try {
+    const items = await prisma.cartItem.findMany({
+      where: { userId },
+      include: { product: { select: { id: true, name: true, images: true } } },
+      orderBy: { createdAt: "asc" },
+    });
+    res.json(items.map(cartItemPayload));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to load cart" });
+  }
+});
+
+app.post("/api/user/:id/cart", async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  if (!userId) return res.status(400).json({ message: "Invalid user id" });
+
+  const {
+    productId,
+    title,
+    name,
+    price,
+    qty = 1,
+    productImage,
+    images,
+    customizations,
+  } = req.body || {};
+
+  if (!productId || !(title || name)) {
+    return res.status(400).json({ message: "Invalid cart item" });
+  }
+
+  try {
+    const normalizedCustomizations = normalizeCartCustomizations(customizations);
+    const existingItems = await prisma.cartItem.findMany({
+      where: { userId, productId: Number(productId) },
+    });
+    const match = existingItems.find(
+      (item) =>
+        JSON.stringify(item.customizations || {}) ===
+        JSON.stringify(normalizedCustomizations),
+    );
+
+    const saved = match
+      ? await prisma.cartItem.update({
+          where: { id: match.id },
+          data: { qty: { increment: Number(qty) || 1 } },
+          include: {
+            product: { select: { id: true, name: true, images: true } },
+          },
+        })
+      : await prisma.cartItem.create({
+          data: {
+            userId,
+            productId: Number(productId),
+            title: title || name,
+            price: Number(price || 0),
+            qty: Math.max(1, Number(qty) || 1),
+            productImage: productImage || images?.[0] || null,
+            customizations: normalizedCustomizations,
+          },
+          include: {
+            product: { select: { id: true, name: true, images: true } },
+          },
+        });
+
+    res.status(match ? 200 : 201).json(cartItemPayload(saved));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to save cart item" });
+  }
+});
+
+app.patch("/api/user/:id/cart/:itemId", async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  const itemId = parseInt(req.params.itemId, 10);
+  const qty = Math.floor(Number(req.body?.qty || 0));
+
+  if (!userId || !itemId) {
+    return res.status(400).json({ message: "Invalid cart item" });
+  }
+
+  try {
+    if (qty < 1) {
+      await prisma.cartItem.deleteMany({ where: { id: itemId, userId } });
+      return res.json({ message: "Cart item removed" });
+    }
+
+    const existing = await prisma.cartItem.findFirst({
+      where: { id: itemId, userId },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ message: "Cart item not found" });
+    }
+
+    const item = await prisma.cartItem.update({
+      where: { id: existing.id },
+      data: { qty },
+      include: { product: { select: { id: true, name: true, images: true } } },
+    });
+
+    res.json(cartItemPayload(item));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to update cart item" });
+  }
+});
+
+app.delete("/api/user/:id/cart/:itemId", async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  const itemId = parseInt(req.params.itemId, 10);
+  if (!userId || !itemId) return res.status(400).json({ message: "Invalid cart item" });
+
+  try {
+    await prisma.cartItem.deleteMany({ where: { id: itemId, userId } });
+    res.json({ message: "Cart item removed" });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to remove cart item" });
+  }
+});
+
+app.delete("/api/user/:id/cart", async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  if (!userId) return res.status(400).json({ message: "Invalid user id" });
+
+  try {
+    await prisma.cartItem.deleteMany({ where: { userId } });
+    res.json({ message: "Cart cleared" });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to clear cart" });
+  }
+});
+
 app.get("/api/admin/orders", async (req, res) => {
   try {
     const orders = await prisma.order.findMany({
