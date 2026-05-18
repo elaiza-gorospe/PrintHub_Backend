@@ -249,6 +249,126 @@ const roleFromDb = (num) => {
   return "customer";
 };
 
+const money = (value) =>
+  new Intl.NumberFormat("en-PH", {
+    style: "currency",
+    currency: "PHP",
+  }).format(Number(value || 0));
+
+const getCustomerName = (order) =>
+  [order.user?.first_name, order.user?.last_name].filter(Boolean).join(" ") ||
+  order.user?.email ||
+  "Customer";
+
+const ORDER_STATUS_LABELS = {
+  pending: "Order placed",
+  confirmed: "Ordered/Paid",
+  processing: "In process",
+  completed: "Done",
+  delivered: "Delivered",
+  cancelled: "Cancelled",
+  return_requested: "Return requested",
+};
+
+const PRODUCTION_STATUSES = ["confirmed", "processing", "completed"];
+
+async function sendSystemEmail({ to, subject, text, html }) {
+  const payload = {
+    to,
+    subject,
+    body: text,
+    status: transporter ? "queued" : "mock",
+  };
+
+  if (!to) return { ...payload, status: "skipped", reason: "missing recipient" };
+  if (!transporter) {
+    console.log(`System email mock to ${to}: ${subject}`);
+    return payload;
+  }
+
+  try {
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER || process.env.GMAIL_USER,
+      to,
+      subject,
+      text,
+      html,
+    });
+    return { ...payload, status: "sent" };
+  } catch (err) {
+    console.error("System email failed:", err.message);
+    return { ...payload, status: "failed", error: err.message };
+  }
+}
+
+async function notifyOrderStatus(order, statusOverride) {
+  const status = statusOverride || order.status || "pending";
+  const label = ORDER_STATUS_LABELS[status] || status.replace(/_/g, " ");
+  const customerName = getCustomerName(order);
+  return sendSystemEmail({
+    to: order.user?.email,
+    subject: `PrintHub Order #${order.id}: ${label}`,
+    text: `Hi ${customerName}, your Order #${order.id} status is now "${label}". Total: ${money(order.total)}.`,
+    html: `<p>Hi ${customerName},</p><p>Your Order #${order.id} status is now <strong>${label}</strong>.</p><p>Total: <strong>${money(order.total)}</strong></p>`,
+  });
+}
+
+async function notifyPaymentConfirmation(order) {
+  const receipt = buildReceiptPayload(order, "paid");
+  return sendSystemEmail({
+    to: order.user?.email,
+    subject: `Payment confirmed - PMG Receipt ${receipt.receiptNo}`,
+    text: `Hi ${receipt.customerName}, payment for Order #${order.id} is confirmed. Receipt: ${receipt.receiptNo}. Total: ${money(order.total)}.`,
+    html: `<p>Hi ${receipt.customerName},</p><p>Payment for Order #${order.id} is confirmed.</p><p>Receipt: <strong>${receipt.receiptNo}</strong></p><p>Total: <strong>${money(order.total)}</strong></p>`,
+  });
+}
+
+async function notifyLowStockProducts(products, threshold = 10) {
+  const low = products.filter((product) => Number(product.stock) <= threshold);
+  if (low.length === 0) return null;
+  const adminUsers = await prisma.user.findMany({
+    where: { role: { in: [0, 1] }, status: "active" },
+    select: { email: true },
+  });
+  const recipients = adminUsers.map((user) => user.email).filter(Boolean);
+  if (recipients.length === 0) return null;
+
+  return sendSystemEmail({
+    to: recipients.join(","),
+    subject: "PrintHub inventory alert: low stock",
+    text: low
+      .map((product) => `${product.name} (${product.sku || "no SKU"}): ${product.stock} left`)
+      .join("\n"),
+  });
+}
+
+async function notifyAdminsNewOrderForReview(order) {
+  const adminUsers = await prisma.user.findMany({
+    where: { role: { in: [0, 1] }, status: "active" },
+    select: { email: true },
+  });
+  const recipients = adminUsers.map((user) => user.email).filter(Boolean);
+  if (recipients.length === 0) return null;
+
+  const customerName = getCustomerName(order);
+  return sendSystemEmail({
+    to: recipients.join(","),
+    subject: `New order needs design approval - Order #${order.id}`,
+    text: `Order #${order.id} from ${customerName} is waiting for admin design approval before payment. Total: ${money(order.total)}.`,
+    html: `<p>Order #${order.id} from <strong>${customerName}</strong> is waiting for admin design approval before payment.</p><p>Total: <strong>${money(order.total)}</strong></p>`,
+  });
+}
+
+async function notifyDesignApproval(order) {
+  const customerName = getCustomerName(order);
+  return sendSystemEmail({
+    to: order.user?.email,
+    subject: `PrintHub Order #${order.id}: Design approved`,
+    text: `Hi ${customerName}, your design for Order #${order.id} has been approved. You can now proceed with payment.`,
+    html: `<p>Hi ${customerName},</p><p>Your design for Order #${order.id} has been approved. You can now proceed with payment.</p>`,
+  });
+}
+
 const otpStore = {};
 let transporter = null;
 
@@ -1065,8 +1185,29 @@ app.post("/api/orders", async (req, res) => {
       return newOrder;
     });
 
+    const orderWithDetails = await prisma.order.findUnique({
+      where: { id: order.id },
+      include: {
+        user: true,
+        items: { include: { product: true } },
+      },
+    });
+    const notification = await notifyOrderStatus(orderWithDetails, "pending");
+    const adminReviewNotification =
+      await notifyAdminsNewOrderForReview(orderWithDetails);
+    const updatedProducts = await prisma.product.findMany({
+      where: { id: { in: productIds } },
+    });
+    const lowStockAlert = await notifyLowStockProducts(updatedProducts, 10);
+
     console.log(`✅ Order created: ID=${order.id}, total=${order.total}`);
-    res.json({ message: "Order created", order });
+    res.json({
+      message: "Order created",
+      order: orderWithDetails || order,
+      notification,
+      adminReviewNotification,
+      lowStockAlert,
+    });
   } catch (e) {
     console.error("❌ Order creation failed:", e.message);
     res.status(500).json({ message: "Order creation failed" });
@@ -1126,6 +1267,125 @@ app.get("/api/admin/orders", async (req, res) => {
   } catch (e) {
     console.error(e);
     res.status(500).json({ message: "DB error" });
+  }
+});
+
+app.get("/api/admin/production-queue", async (req, res) => {
+  try {
+    const orders = await prisma.order.findMany({
+      where: {
+        deleted_at: null,
+        status: { in: PRODUCTION_STATUSES },
+      },
+      include: {
+        user: true,
+        items: { include: { product: true } },
+      },
+      orderBy: [{ due_date: "asc" }, { createdAt: "asc" }],
+    });
+
+    res.json({
+      statuses: PRODUCTION_STATUSES,
+      queue: orders.map((order) => ({
+        id: order.id,
+        customer: getCustomerName(order),
+        status: order.status,
+        statusLabel: ORDER_STATUS_LABELS[order.status] || order.status,
+        payment_status: order.payment_status,
+        total: order.total,
+        createdAt: order.createdAt,
+        due_date: order.due_date,
+        items: order.items,
+      })),
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch production queue" });
+  }
+});
+
+app.get("/api/admin/reports/sales", async (req, res) => {
+  try {
+    const from = req.query.from ? new Date(req.query.from) : null;
+    const to = req.query.to ? new Date(req.query.to) : null;
+    if (to) to.setHours(23, 59, 59, 999);
+
+    const createdAt = {};
+    if (from && !isNaN(from.getTime())) createdAt.gte = from;
+    if (to && !isNaN(to.getTime())) createdAt.lte = to;
+
+    const where = {
+      deleted_at: null,
+      ...(Object.keys(createdAt).length ? { createdAt } : {}),
+    };
+
+    const orders = await prisma.order.findMany({
+      where,
+      include: {
+        user: true,
+        items: { include: { product: true } },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const paidOrders = orders.filter((order) => order.payment_status === "paid");
+    const completedOrders = orders.filter((order) =>
+      ["completed", "delivered"].includes(order.status),
+    );
+    const revenue = paidOrders.reduce(
+      (sum, order) => sum + Number(order.total || 0),
+      0,
+    );
+
+    const byStatus = orders.reduce((acc, order) => {
+      acc[order.status] = (acc[order.status] || 0) + 1;
+      return acc;
+    }, {});
+
+    const productMap = new Map();
+    orders.forEach((order) => {
+      order.items.forEach((item) => {
+        const key = item.productId;
+        const current = productMap.get(key) || {
+          productId: key,
+          name: item.product?.name || `Product #${key}`,
+          quantity: 0,
+          revenue: 0,
+        };
+        current.quantity += Number(item.quantity || 0);
+        current.revenue += Number(item.total_price || 0);
+        productMap.set(key, current);
+      });
+    });
+
+    res.json({
+      range: {
+        from: from && !isNaN(from.getTime()) ? from.toISOString() : null,
+        to: to && !isNaN(to.getTime()) ? to.toISOString() : null,
+      },
+      summary: {
+        orders: orders.length,
+        paidOrders: paidOrders.length,
+        completedOrders: completedOrders.length,
+        revenue,
+        averageOrderValue: paidOrders.length ? revenue / paidOrders.length : 0,
+      },
+      byStatus,
+      topProducts: Array.from(productMap.values())
+        .sort((a, b) => b.revenue - a.revenue)
+        .slice(0, 10),
+      recentOrders: orders.slice(0, 25).map((order) => ({
+        id: order.id,
+        customer: getCustomerName(order),
+        status: order.status,
+        payment_status: order.payment_status,
+        total: order.total,
+        createdAt: order.createdAt,
+      })),
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to build sales report" });
   }
 });
 
@@ -1851,6 +2111,7 @@ app.put("/api/orders/:id", async (req, res) => {
       where: { id: parseInt(req.params.id) },
       data: {
         ...(status && { status }),
+        ...(status === "delivered" && { delivered_at: new Date() }),
         ...(proofApproved !== undefined && { proofApproved }),
         ...(due_date && { due_date: new Date(due_date) }),
         ...(shipping_address && { shipping_address }),
@@ -1859,13 +2120,88 @@ app.put("/api/orders/:id", async (req, res) => {
       include: { items: true, user: true },
     });
 
-    res.json({ message: "Order updated", order });
+    const notification = status ? await notifyOrderStatus(order, status) : null;
+    res.json({ message: "Order updated", order, notification });
   } catch (e) {
     console.error(e);
     if (e.code === "P2025") {
       return res.status(404).json({ message: "Order not found" });
     }
     res.status(500).json({ message: "Failed to update order" });
+  }
+});
+
+app.post("/api/orders/:id/onsite-payment", async (req, res) => {
+  try {
+    const { payment_reference } = req.body || {};
+    const existing = await prisma.order.findUnique({
+      where: { id: parseInt(req.params.id) },
+      select: { id: true, proofApproved: true, deleted_at: true },
+    });
+    if (!existing || existing.deleted_at) {
+      return res.status(404).json({ message: "Order not found" });
+    }
+    if (!existing.proofApproved) {
+      return res.status(403).json({
+        message:
+          "Design approval is required before recording payment for this order.",
+      });
+    }
+
+    const order = await prisma.order.update({
+      where: { id: parseInt(req.params.id) },
+      data: {
+        payment_status: "paid",
+        status: "confirmed",
+        payment_method: "onsite",
+        payment_reference:
+          payment_reference || `ONSITE-${Date.now()}-${req.params.id}`,
+      },
+      include: {
+        user: true,
+        items: { include: { product: true } },
+      },
+    });
+    const paymentNotification = await notifyPaymentConfirmation(order);
+    const statusNotification = await notifyOrderStatus(order, "confirmed");
+
+    res.json({
+      message: "Order marked as paid onsite",
+      order,
+      receipt: buildReceiptPayload(order, "paid"),
+      notifications: [paymentNotification, statusNotification],
+    });
+  } catch (e) {
+    console.error(e);
+    if (e.code === "P2025") {
+      return res.status(404).json({ message: "Order not found" });
+    }
+    res.status(500).json({ message: "Failed to record onsite payment" });
+  }
+});
+
+app.post("/api/orders/:id/approve-design", async (req, res) => {
+  try {
+    const order = await prisma.order.update({
+      where: { id: parseInt(req.params.id) },
+      data: { proofApproved: true },
+      include: {
+        user: true,
+        items: { include: { product: true } },
+      },
+    });
+    const notification = await notifyDesignApproval(order);
+    res.json({
+      message: "Design approved. Customer can now pay.",
+      order,
+      notification,
+    });
+  } catch (e) {
+    console.error(e);
+    if (e.code === "P2025") {
+      return res.status(404).json({ message: "Order not found" });
+    }
+    res.status(500).json({ message: "Failed to approve design" });
   }
 });
 
@@ -1881,7 +2217,8 @@ app.patch("/api/orders/:id/deliver", async (req, res) => {
       include: { items: true, user: true },
     });
 
-    res.json({ message: "Order marked as delivered", order });
+    const notification = await notifyOrderStatus(order, "delivered");
+    res.json({ message: "Order marked as delivered", order, notification });
   } catch (e) {
     console.error(e);
     if (e.code === "P2025") {
@@ -2676,6 +3013,12 @@ app.post("/api/payments/checkout", async (req, res) => {
     if (!order) return res.status(404).json({ message: "Order not found" });
     if (order.payment_status === "paid")
       return res.status(400).json({ message: "Order already paid" });
+    if (!order.proofApproved) {
+      return res.status(403).json({
+        message:
+          "Your order is waiting for admin design approval before payment.",
+      });
+    }
 
     const frontendUrl =
       returnBase || process.env.FRONTEND_URL || "http://localhost:3001";
@@ -2863,10 +3206,17 @@ app.get("/api/payments/:orderId/status", async (req, res) => {
             },
           });
 
+          const paymentNotification = await notifyPaymentConfirmation(paidOrder);
+          const statusNotification = await notifyOrderStatus(
+            paidOrder,
+            "confirmed",
+          );
+
           return res.json({
             payment_status: "paid",
             order: paidOrder,
             receipt: buildReceiptPayload(paidOrder),
+            notifications: [paymentNotification, statusNotification],
           });
         }
       }
@@ -2956,7 +3306,7 @@ app.post(
           attrs.payment_method_type || attrs.source?.type || null;
         const paymentReference = eventData?.id || null;
 
-        await prisma.order.update({
+        const paidOrder = await prisma.order.update({
           where: { id: orderId },
           data: {
             payment_status: "paid",
@@ -2964,7 +3314,13 @@ app.post(
             payment_method: paymentMethod,
             payment_reference: paymentReference,
           },
+          include: {
+            user: true,
+            items: { include: { product: true } },
+          },
         });
+        await notifyPaymentConfirmation(paidOrder);
+        await notifyOrderStatus(paidOrder, "confirmed");
 
         console.log(`✅ Order #${orderId} marked as paid via PayMongo`);
       }
