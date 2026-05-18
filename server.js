@@ -2580,6 +2580,480 @@ app.post(
   },
 );
 
+// =================================================
+// REVIEWS & RATINGS API
+// =================================================
+
+function maskName(name) {
+  if (!name || name.length <= 2) return name;
+  return name[0] + "*".repeat(Math.max(name.length - 2, 3)) + name[name.length - 1];
+}
+
+// POST /api/reviews — submit a review
+app.post("/api/reviews", async (req, res) => {
+  const { userId, productId, orderId, rating, title, body, is_anonymous } = req.body;
+
+  if (!userId || !productId || !rating) {
+    return res.status(400).json({ message: "userId, productId, and rating are required" });
+  }
+
+  if (rating < 1 || rating > 5 || !Number.isInteger(rating)) {
+    return res.status(400).json({ message: "rating must be an integer between 1 and 5" });
+  }
+
+  try {
+    // Check for duplicate review (one per user per product)
+    const existing = await prisma.review.findFirst({
+      where: { userId, productId },
+    });
+
+    if (existing) {
+      return res.status(400).json({ message: "You have already reviewed this product" });
+    }
+
+    const review = await prisma.review.create({
+      data: {
+        userId,
+        productId,
+        orderId: orderId ? parseInt(orderId) : null,
+        rating: parseInt(rating),
+        title: title || null,
+        body: body || null,
+        is_anonymous: is_anonymous || false,
+      },
+      include: { user: { select: { id: true, first_name: true, last_name: true } } },
+    });
+
+    res.status(201).json({ message: "Review submitted", review });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to submit review" });
+  }
+});
+
+// GET /api/products/:id/reviews — get all reviews for a product (public)
+app.get("/api/products/:id/reviews", async (req, res) => {
+  try {
+    const productId = parseInt(req.params.id);
+    const reviews = await prisma.review.findMany({
+      where: { productId },
+      include: { user: { select: { first_name: true, last_name: true } } },
+      orderBy: { createdAt: "desc" },
+    });
+
+    const mapped = reviews.map((r) => ({
+      ...r,
+      displayName: r.is_anonymous
+        ? maskName(r.user.first_name)
+        : `${r.user.first_name} ${(r.user.last_name || "")[0] || ""}`.trim(),
+    }));
+
+    res.json(mapped);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch reviews" });
+  }
+});
+
+// GET /api/user/:id/reviews — get user's own reviews (unmasked)
+app.get("/api/user/:id/reviews", async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id);
+    const reviews = await prisma.review.findMany({
+      where: { userId },
+      include: { product: { select: { id: true, name: true } } },
+      orderBy: { createdAt: "desc" },
+    });
+
+    res.json(reviews);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch reviews" });
+  }
+});
+
+// PUT /api/reviews/:id — edit own review
+app.put("/api/reviews/:id", async (req, res) => {
+  try {
+    const reviewId = parseInt(req.params.id);
+    const { userId, rating, title, body, is_anonymous } = req.body;
+
+    // Verify ownership
+    const existing = await prisma.review.findUnique({ where: { id: reviewId } });
+    if (!existing) return res.status(404).json({ message: "Review not found" });
+    if (existing.userId !== userId) {
+      return res.status(403).json({ message: "Cannot edit another user's review" });
+    }
+
+    const review = await prisma.review.update({
+      where: { id: reviewId },
+      data: {
+        ...(rating && { rating: parseInt(rating) }),
+        ...(title !== undefined && { title }),
+        ...(body !== undefined && { body }),
+        ...(is_anonymous !== undefined && { is_anonymous }),
+      },
+      include: { user: { select: { first_name: true, last_name: true } } },
+    });
+
+    res.json({ message: "Review updated", review });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to update review" });
+  }
+});
+
+// DELETE /api/reviews/:id — delete own review
+app.delete("/api/reviews/:id", async (req, res) => {
+  try {
+    const reviewId = parseInt(req.params.id);
+    const { userId } = req.body;
+
+    // Verify ownership
+    const existing = await prisma.review.findUnique({ where: { id: reviewId } });
+    if (!existing) return res.status(404).json({ message: "Review not found" });
+    if (existing.userId !== userId) {
+      return res.status(403).json({ message: "Cannot delete another user's review" });
+    }
+
+    await prisma.review.delete({ where: { id: reviewId } });
+    res.json({ message: "Review deleted" });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to delete review" });
+  }
+});
+
+// GET /api/admin/reviews — admin: all reviews with filters
+app.get("/api/admin/reviews", async (req, res) => {
+  try {
+    const { productId, rating, status } = req.query;
+    const where = {};
+
+    if (productId) where.productId = parseInt(productId);
+    if (rating) where.rating = parseInt(rating);
+
+    const reviews = await prisma.review.findMany({
+      where,
+      include: {
+        user: { select: { id: true, first_name: true, last_name: true } },
+        product: { select: { id: true, name: true } },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    res.json(reviews);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch reviews" });
+  }
+});
+
+// PUT /api/admin/reviews/:id/reply — admin adds/edits reply
+app.put("/api/admin/reviews/:id/reply", async (req, res) => {
+  try {
+    const reviewId = parseInt(req.params.id);
+    const { admin_reply } = req.body;
+
+    const review = await prisma.review.update({
+      where: { id: reviewId },
+      data: { admin_reply },
+      include: { user: { select: { first_name: true, last_name: true } } },
+    });
+
+    res.json({ message: "Reply added", review });
+  } catch (e) {
+    console.error(e);
+    if (e.code === "P2025") {
+      return res.status(404).json({ message: "Review not found" });
+    }
+    res.status(500).json({ message: "Failed to add reply" });
+  }
+});
+
+// GET /api/admin/analytics/reviews — rating analytics
+app.get("/api/admin/analytics/reviews", async (req, res) => {
+  try {
+    // Count reviews by rating (1-5)
+    const ratingDistribution = await prisma.review.groupBy({
+      by: ["rating"],
+      _count: { id: true },
+    });
+
+    // Avg rating per product
+    const reviews = await prisma.review.findMany({
+      include: { product: { select: { id: true, name: true } } },
+    });
+
+    const byProduct = {};
+    reviews.forEach((r) => {
+      if (!byProduct[r.productId]) {
+        byProduct[r.productId] = {
+          productId: r.productId,
+          productName: r.product.name,
+          ratings: [],
+        };
+      }
+      byProduct[r.productId].ratings.push(r.rating);
+    });
+
+    const productStats = Object.values(byProduct).map((p) => ({
+      productId: p.productId,
+      productName: p.productName,
+      avgRating: (p.ratings.reduce((a, b) => a + b, 0) / p.ratings.length).toFixed(2),
+      count: p.ratings.length,
+    }));
+
+    const distribution = {};
+    for (let i = 1; i <= 5; i++) {
+      distribution[i] = 0;
+    }
+    ratingDistribution.forEach((r) => {
+      distribution[r.rating] = r._count.id;
+    });
+
+    res.json({
+      totalReviews: reviews.length,
+      ratingDistribution: distribution,
+      averageRating: reviews.length > 0
+        ? (reviews.reduce((a, r) => a + r.rating, 0) / reviews.length).toFixed(2)
+        : 0,
+      productStats,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch analytics" });
+  }
+});
+
+// =================================================
+// COMPLAINTS API
+// =================================================
+
+const COMPLAINT_MAX_UPLOAD_SIZE = 5 * 1024 * 1024; // 5 MB
+const complaintUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: COMPLAINT_MAX_UPLOAD_SIZE },
+  fileFilter: (_req, file, cb) => {
+    const allowed = new Set([
+      "image/jpeg",
+      "image/png",
+      "image/webp",
+      "image/gif",
+    ]);
+    if (allowed.has(file.mimetype)) cb(null, true);
+    else cb(new Error("Only JPEG, PNG, WebP, and GIF images are allowed"));
+  },
+});
+
+// POST /api/complaints/upload-image — upload complaint image
+app.post(
+  "/api/complaints/upload-image",
+  complaintUpload.single("file"),
+  async (req, res) => {
+    if (!req.file) return res.status(400).json({ message: "No file provided" });
+
+    try {
+      const { data: existing } = await supabase.storage.getBucket("printhub_s3");
+      if (!existing) {
+        const { error: bucketErr } = await supabase.storage.createBucket(
+          "printhub_s3",
+          {
+            public: true,
+            fileSizeLimit: COMPLAINT_MAX_UPLOAD_SIZE,
+          },
+        );
+        if (bucketErr)
+          throw new Error(`Cannot create storage bucket: ${bucketErr.message}`);
+      }
+
+      const ext = req.file.mimetype.split("/")[1] || "jpg";
+      const path = `complaints/${Date.now()}.${ext}`;
+
+      const { error } = await supabase.storage
+        .from("printhub_s3")
+        .upload(path, req.file.buffer, {
+          contentType: req.file.mimetype,
+          upsert: false,
+        });
+
+      if (error) throw new Error(`Storage upload failed: ${error.message}`);
+
+      const { data: urlData } = supabase.storage
+        .from("printhub_s3")
+        .getPublicUrl(path);
+
+      return res.status(201).json({
+        url: urlData.publicUrl,
+        path,
+        size: req.file.size,
+        mimeType: req.file.mimetype,
+      });
+    } catch (e) {
+      console.error("Complaint image upload error:", e.message);
+      return res.status(500).json({ message: e.message || "Upload failed" });
+    }
+  },
+);
+
+// POST /api/complaints — submit complaint
+app.post("/api/complaints", async (req, res) => {
+  const { userId, name, order_number, orderId, description, image_url } = req.body;
+
+  if (!name || !description) {
+    return res.status(400).json({ message: "name and description are required" });
+  }
+
+  try {
+    const complaint = await prisma.complaint.create({
+      data: {
+        userId: userId ? parseInt(userId) : null,
+        name,
+        order_number: order_number || null,
+        orderId: orderId ? parseInt(orderId) : null,
+        description,
+        image_url: image_url || null,
+        status: "open",
+      },
+    });
+
+    res.status(201).json({ message: "Complaint submitted", complaint });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to submit complaint" });
+  }
+});
+
+// GET /api/user/:id/complaints — user's own complaints
+app.get("/api/user/:id/complaints", async (req, res) => {
+  try {
+    const userId = parseInt(req.params.id);
+    const complaints = await prisma.complaint.findMany({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+    });
+
+    res.json(complaints);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch complaints" });
+  }
+});
+
+// GET /api/admin/complaints — admin: all complaints
+app.get("/api/admin/complaints", async (req, res) => {
+  try {
+    const { status } = req.query;
+    const where = status ? { status } : {};
+
+    const complaints = await prisma.complaint.findMany({
+      where,
+      include: { user: { select: { id: true, first_name: true, last_name: true, email: true } } },
+      orderBy: { createdAt: "desc" },
+    });
+
+    res.json(complaints);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch complaints" });
+  }
+});
+
+// GET /api/admin/complaints/:id — admin: single complaint detail
+app.get("/api/admin/complaints/:id", async (req, res) => {
+  try {
+    const complaintId = parseInt(req.params.id);
+    const complaint = await prisma.complaint.findUnique({
+      where: { id: complaintId },
+      include: { user: { select: { id: true, first_name: true, last_name: true, email: true } } },
+    });
+
+    if (!complaint) {
+      return res.status(404).json({ message: "Complaint not found" });
+    }
+
+    res.json(complaint);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch complaint" });
+  }
+});
+
+// PUT /api/admin/complaints/:id — admin update complaint
+app.put("/api/admin/complaints/:id", async (req, res) => {
+  try {
+    const complaintId = parseInt(req.params.id);
+    const { status, admin_notes, admin_reply } = req.body;
+
+    const complaint = await prisma.complaint.update({
+      where: { id: complaintId },
+      data: {
+        ...(status && { status }),
+        ...(admin_notes !== undefined && { admin_notes }),
+        ...(admin_reply !== undefined && { admin_reply }),
+      },
+      include: { user: { select: { id: true, first_name: true, last_name: true } } },
+    });
+
+    res.json({ message: "Complaint updated", complaint });
+  } catch (e) {
+    console.error(e);
+    if (e.code === "P2025") {
+      return res.status(404).json({ message: "Complaint not found" });
+    }
+    res.status(500).json({ message: "Failed to update complaint" });
+  }
+});
+
+// GET /api/admin/analytics/complaints — complaint analytics
+app.get("/api/admin/analytics/complaints", async (req, res) => {
+  try {
+    const complaints = await prisma.complaint.findMany();
+
+    // Count by status
+    const byStatus = {};
+    const statuses = ["open", "in_review", "resolved", "closed"];
+    statuses.forEach((s) => {
+      byStatus[s] = complaints.filter((c) => c.status === s).length;
+    });
+
+    // Monthly trend (last 6 months)
+    const monthlyTrend = {};
+    const now = new Date();
+    for (let i = 5; i >= 0; i--) {
+      const date = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = date.toISOString().slice(0, 7); // YYYY-MM
+      monthlyTrend[key] = complaints.filter((c) => {
+        const cDate = new Date(c.createdAt);
+        return cDate.getFullYear() === date.getFullYear() && cDate.getMonth() === date.getMonth();
+      }).length;
+    }
+
+    res.json({
+      totalComplaints: complaints.length,
+      byStatus,
+      monthlyTrend,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ message: "Failed to fetch analytics" });
+  }
+});
+
+// Multer error handler for complaint upload
+app.use((err, req, res, next) => {
+  if (
+    err instanceof multer.MulterError &&
+    req.path === "/api/complaints/upload-image"
+  ) {
+    return res.status(400).json({ message: err.message });
+  }
+  if (err && req.path === "/api/complaints/upload-image") {
+    return res.status(400).json({ message: err.message });
+  }
+  next(err);
+});
+
 // Start server with migrations
 (async () => {
   // Log PayMongo configuration status to help with live conversion
