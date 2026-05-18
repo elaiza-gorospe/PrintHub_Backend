@@ -3234,7 +3234,7 @@ app.post("/api/payments/checkout", async (req, res) => {
       data: {
         attributes: {
           line_items: lineItems,
-          payment_method_types: ["card", "gcash", "paymaya"],
+          payment_method_types: ["qrph"],
           success_url: `${frontendUrl}/payment/return?orderId=${order.id}&status=success`,
           cancel_url: `${frontendUrl}/payment/return?orderId=${order.id}&status=cancelled`,
           description: `PrintHub Order #${order.id}`,
