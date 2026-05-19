@@ -15,6 +15,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@capacitor/app": "^8.1.0",
     "@prisma/client": "^5.22.0",
     "@supabase/supabase-js": "^2.103.1",
     "bcrypt": "^6.0.0",

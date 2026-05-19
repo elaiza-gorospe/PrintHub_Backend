@@ -3034,6 +3034,68 @@ function paymongoAuth() {
   return Buffer.from(key + ":").toString("base64");
 }
 
+function paymongoPaymentMethods(requestedMethods) {
+  const source = Array.isArray(requestedMethods)
+    ? requestedMethods.join(",")
+    : process.env.PAYMONGO_PAYMENT_METHOD_TYPES;
+  const configured = process.env.PAYMONGO_PAYMENT_METHOD_TYPES;
+  const methods = (source || configured || "qrph")
+    .split(",")
+    .map((method) => method.trim().toLowerCase())
+    .filter(Boolean);
+
+  return [...new Set(methods)];
+}
+
+async function paymongoRequest(path, options = {}) {
+  const authHeader = paymongoAuth();
+  if (!authHeader) {
+    const error = new Error("Payment provider not configured (missing secret)");
+    error.status = 500;
+    throw error;
+  }
+
+  const response = await fetch(`${PAYMONGO_BASE}${path}`, {
+    ...options,
+    headers: {
+      Authorization: `Basic ${authHeader}`,
+      Accept: "application/json",
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers || {}),
+    },
+  });
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const error = new Error("PayMongo request failed");
+    error.status = 502;
+    error.details = data?.errors || data;
+    throw error;
+  }
+
+  return data;
+}
+
+function customerBillingForOrder(order) {
+  const firstName = order.user?.first_name || "";
+  const lastName = order.user?.last_name || "";
+  const fullName = `${firstName} ${lastName}`.trim() || `Order #${order.id}`;
+
+  return {
+    name: fullName,
+    email: order.user?.email || undefined,
+    phone: order.user?.phone || undefined,
+    address: {
+      line1:
+        order.billing_address ||
+        order.shipping_address ||
+        order.user?.address ||
+        "Philippines",
+      country: "PH",
+    },
+  };
+}
+
 // POST /api/payments/checkout — create a PayMongo Checkout Session for an order
 app.get("/api/user/:id/payment-logs", async (req, res) => {
   const userId = parseInt(req.params.id);
@@ -3163,7 +3225,13 @@ app.post("/api/orders/:id/return-complaint", async (req, res) => {
 });
 
 app.post("/api/payments/checkout", async (req, res) => {
-  const { orderId, returnBase } = req.body;
+  const {
+    orderId,
+    appReturnBase,
+    returnBase,
+    paymentMethods,
+    compactCheckout,
+  } = req.body;
   if (!orderId) return res.status(400).json({ message: "orderId is required" });
 
   try {
@@ -3182,8 +3250,23 @@ app.post("/api/payments/checkout", async (req, res) => {
       });
     }
 
-    const frontendUrl =
-      returnBase || process.env.FRONTEND_URL || "http://localhost:3001";
+    const publicFrontendUrl =
+      process.env.PUBLIC_FRONTEND_URL ||
+      process.env.FRONTEND_URL ||
+      "https://project-n80jh.vercel.app";
+    const paymentReturnBase =
+      appReturnBase ||
+      returnBase ||
+      process.env.PAYMENT_RETURN_BASE ||
+      publicFrontendUrl;
+    const buildPaymentReturnUrl = (status) => {
+      const needsExtraSlash = /^[a-z][a-z0-9+.-]*:\/\/$/i.test(
+        paymentReturnBase,
+      );
+      const separator =
+        needsExtraSlash || !paymentReturnBase.endsWith("/") ? "/" : "";
+      return `${paymentReturnBase}${separator}payment/return?orderId=${order.id}&status=${status}`;
+    };
 
     // Build line items from order items
     // Build line items from order items, normalize image URLs and include both
@@ -3194,10 +3277,11 @@ app.post("/api/payments/checkout", async (req, res) => {
         (item.product && item.product.images && item.product.images[0]) ||
         undefined;
 
-      // Ensure image URL is absolute. If it's a relative path, prefix with frontend URL.
+      // Ensure image URL is absolute. If it's a relative path, prefix with the
+      // public web URL, not the APK-only custom return scheme.
       let imageUrl = rawImageUrl;
       if (imageUrl && imageUrl.startsWith("/")) {
-        imageUrl = `${frontendUrl.replace(/\/$/, "")}${imageUrl}`;
+        imageUrl = `${publicFrontendUrl.replace(/\/$/, "")}${imageUrl}`;
       }
 
       return {
@@ -3205,8 +3289,8 @@ app.post("/api/payments/checkout", async (req, res) => {
         amount: Math.round(parseFloat(item.unit_price) * 100), // in centavos
         name: item.product?.name || `Item #${item.productId}`,
         quantity: item.quantity,
-        image_url: imageUrl || undefined,
-        images: imageUrl ? [imageUrl] : undefined,
+        image_url: compactCheckout ? undefined : imageUrl || undefined,
+        images: !compactCheckout && imageUrl ? [imageUrl] : undefined,
       };
     });
 
@@ -3229,14 +3313,15 @@ app.post("/api/payments/checkout", async (req, res) => {
     }
 
     const totalAmountCentavos = Math.round(parseFloat(order.total) * 100);
+    const checkoutPaymentMethods = paymongoPaymentMethods(paymentMethods);
 
     const sessionPayload = {
       data: {
         attributes: {
           line_items: lineItems,
-          payment_method_types: ["qrph"],
-          success_url: `${frontendUrl}/payment/return?orderId=${order.id}&status=success`,
-          cancel_url: `${frontendUrl}/payment/return?orderId=${order.id}&status=cancelled`,
+          payment_method_types: checkoutPaymentMethods,
+          success_url: buildPaymentReturnUrl("success"),
+          cancel_url: buildPaymentReturnUrl("cancelled"),
           description: `PrintHub Order #${order.id}`,
           reference_number: String(order.id),
           metadata: { order_id: String(order.id) },
@@ -3296,11 +3381,124 @@ app.post("/api/payments/checkout", async (req, res) => {
     res.json({ checkout_url: checkoutUrl, session_id: sessionId });
   } catch (e) {
     console.error(e);
-    res.status(500).json({ message: "Internal server error" });
+    res.status(e.status || 500).json({ message: e.message || "Internal server error" });
   }
 });
 
 // GET /api/payments/:orderId/status — poll payment status (fallback for missed webhooks)
+// POST /api/payments/qrph — create a live QR Ph code customers can scan with GCash/Maya/banks
+app.post("/api/payments/qrph", async (req, res) => {
+  const { orderId } = req.body || {};
+  if (!orderId) return res.status(400).json({ message: "orderId is required" });
+
+  try {
+    const order = await prisma.order.findUnique({
+      where: { id: parseInt(orderId) },
+      include: {
+        user: true,
+        items: { include: { product: true } },
+      },
+    });
+
+    if (!order) return res.status(404).json({ message: "Order not found" });
+    if (order.payment_status === "paid") {
+      return res.status(400).json({ message: "Order already paid" });
+    }
+    if (!order.proofApproved) {
+      return res.status(403).json({
+        message:
+          "Your order is waiting for admin design approval before payment.",
+      });
+    }
+
+    const amount = Math.round(parseFloat(order.total) * 100);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ message: "Invalid order total" });
+    }
+
+    const intent = await paymongoRequest("/payment_intents", {
+      method: "POST",
+      body: JSON.stringify({
+        data: {
+          attributes: {
+            amount,
+            currency: "PHP",
+            payment_method_allowed: ["qrph"],
+            capture_type: "automatic",
+            description: `PrintHub Order #${order.id}`,
+            statement_descriptor: "PrintHub",
+            metadata: { order_id: String(order.id) },
+          },
+        },
+      }),
+    });
+
+    const intentId = intent.data.id;
+    const clientKey = intent.data.attributes.client_key;
+
+    const paymentMethod = await paymongoRequest("/payment_methods", {
+      method: "POST",
+      body: JSON.stringify({
+        data: {
+          attributes: {
+            type: "qrph",
+            billing: customerBillingForOrder(order),
+          },
+        },
+      }),
+    });
+
+    const attached = await paymongoRequest(`/payment_intents/${intentId}/attach`, {
+      method: "POST",
+      body: JSON.stringify({
+        data: {
+          attributes: {
+            payment_method: paymentMethod.data.id,
+            client_key: clientKey,
+          },
+        },
+      }),
+    });
+
+    const attrs = attached.data.attributes || {};
+    const qrImageUrl = attrs.next_action?.code?.image_url;
+
+    if (!qrImageUrl) {
+      return res.status(502).json({
+        message: "PayMongo did not return a QR code. Please try again.",
+      });
+    }
+
+    await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        paymongo_session_id: intentId,
+        checkout_url: null,
+        payment_status: "awaiting_payment",
+        payment_method: "qrph",
+      },
+    });
+
+    res.json({
+      order_id: order.id,
+      amount,
+      currency: "PHP",
+      payment_intent_id: intentId,
+      qr_image_url: qrImageUrl,
+      expires_in_seconds: 30 * 60,
+    });
+  } catch (e) {
+    console.error("PayMongo QR Ph error:", e.details || e);
+    res.status(e.status || 500).json({
+      message:
+        e.message === "PayMongo request failed"
+          ? "Failed to create PayMongo QR payment"
+          : e.message || "Internal server error",
+      details: e.details,
+    });
+  }
+});
+
 app.get("/api/payments/:orderId/status", async (req, res) => {
   const orderId = parseInt(req.params.orderId);
   if (isNaN(orderId))
@@ -3324,6 +3522,52 @@ app.get("/api/payments/:orderId/status", async (req, res) => {
         order,
         receipt: buildReceiptPayload(order),
       });
+    }
+
+    // If we have a QR Ph Payment Intent, check PayMongo for the latest status
+    if (order.paymongo_session_id?.startsWith("pi_")) {
+      const pmData = await paymongoRequest(
+        `/payment_intents/${order.paymongo_session_id}`,
+        { method: "GET" },
+      );
+      const attrs = pmData.data.attributes || {};
+      const payments = Array.isArray(attrs.payments) ? attrs.payments : [];
+      const paidPayment = payments.find((payment) => {
+        const paymentStatus = payment?.attributes?.status;
+        return paymentStatus === "paid" || paymentStatus === "succeeded";
+      });
+
+      if (attrs.status === "succeeded" || paidPayment) {
+        const paidOrder = await prisma.order.update({
+          where: { id: orderId },
+          data: {
+            payment_status: "paid",
+            status: "confirmed",
+            payment_method:
+              paidPayment?.attributes?.source?.type ||
+              attrs.payment_method_allowed?.[0] ||
+              "qrph",
+            payment_reference: paidPayment?.id || order.paymongo_session_id,
+          },
+          include: {
+            user: true,
+            items: { include: { product: true } },
+          },
+        });
+
+        const paymentNotification = await notifyPaymentConfirmation(paidOrder);
+        const statusNotification = await notifyOrderStatus(
+          paidOrder,
+          "confirmed",
+        );
+
+        return res.json({
+          payment_status: "paid",
+          order: paidOrder,
+          receipt: buildReceiptPayload(paidOrder),
+          notifications: [paymentNotification, statusNotification],
+        });
+      }
     }
 
     // If we have a session ID, check PayMongo for the latest status
@@ -3453,9 +3697,17 @@ app.post(
         const attrs = eventData?.attributes || {};
         const metadata =
           attrs.metadata || eventData?.attributes?.metadata || {};
-        const orderId =
+        let orderId =
           parseInt(metadata.order_id) ||
           parseInt(eventData?.attributes?.reference_number);
+
+        if (!orderId && attrs.payment_intent_id) {
+          const order = await prisma.order.findFirst({
+            where: { paymongo_session_id: attrs.payment_intent_id },
+            select: { id: true },
+          });
+          orderId = order?.id;
+        }
 
         if (!orderId) {
           console.warn(
